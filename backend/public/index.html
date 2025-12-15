@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pizza 64 – Free Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; max-width: 980px; margin: 0 auto; }
+    textarea { width: 100%; min-height: 120px; padding: 10px; font-size: 14px; }
+    button { padding: 10px 14px; cursor: pointer; font-weight: 600; }
+    .card { margin-top: 14px; padding: 14px; border: 1px solid #ccc; border-radius: 12px; }
+    .muted { color: #666; }
+    ul { margin: 8px 0; padding-left: 18px; }
+    code { background: #f5f5f5; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Pizza 64 – Order Builder (Mock AI)</h1>
+  <p class="muted">This page calls <code>POST /api/ai/pizza64-order</code>. By default it returns a mock order (no OpenAI cost).</p>
+
+  <div class="card">
+    <label><b>Customer message:</b></label>
+    <textarea id="transcript" placeholder='Example: "2 medium butter chicken pizzas for delivery add pineapple mild"'></textarea>
+    <div style="margin-top:10px;">
+      <button id="btn">Build Ticket</button>
+      <span class="muted" id="status"></span>
+    </div>
+  </div>
+
+  <div id="out" class="card" style="display:none;"></div>
+
+  <script>
+    const transcriptEl = document.getElementById("transcript");
+    const outEl = document.getElementById("out");
+    const btn = document.getElementById("btn");
+    const statusEl = document.getElementById("status");
+
+    function esc(s) {
+      return String(s ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    btn.addEventListener("click", async () => {
+      const transcript = transcriptEl.value.trim();
+      if (!transcript) return alert("Type a customer message first.");
+
+      statusEl.textContent = "Calling backend...";
+      outEl.style.display = "none";
+      outEl.innerHTML = "";
+
+      try {
+        const res = await fetch("/api/ai/pizza64-order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript })
+        });
+
+        const text = await res.text();
+        if (!res.ok) throw new Error("HTTP " + res.status + ": " + text);
+
+        const data = JSON.parse(text);
+        const order = data.order;
+
+        const itemsHtml = (order.items || []).map(i => {
+          const tops = (i.toppings || []).join(", ") || "none";
+          return `<li>
+            <b>${esc(i.quantity)}×</b> ${esc(i.size || "")} ${esc(i.name)}
+            <div class="muted">Spice: ${esc(i.spice_level)} | Toppings: ${esc(tops)}</div>
+          </li>`;
+        }).join("");
+
+        outEl.style.display = "block";
+        outEl.innerHTML = `
+          <h2>Ticket</h2>
+          <div class="muted">Mode: ${esc(data.mode)}</div>
+          <p><b>Type:</b> ${esc(order.orderType)}</p>
+          <p><b>Name:</b> ${esc(order.customer?.name)}</p>
+          <p><b>Phone:</b> ${esc(order.customer?.phone)}</p>
+          <p><b>Address:</b> ${esc(order.customer?.address || "Pickup (no address)")}</p>
+          <h3>Items</h3>
+          <ul>${itemsHtml}</ul>
+          <p><b>Notes:</b> ${esc(order.special_instructions || "none")}</p>
+          <p><b>Time:</b> ${esc(order.requested_time || "ASAP")}</p>
+          <p><b>Payment:</b> ${esc(order.payment_method || "unknown")}</p>
+        `;
+
+        statusEl.textContent = "Done ✅";
+      } catch (err) {
+        statusEl.textContent = "";
+        alert("Request failed: " + err.message);
+      }
+    });
+  </script>
+</body>
+</html>
