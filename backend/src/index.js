@@ -1,4 +1,6 @@
 // index.js
+console.log("ENV CHECK - OPENAI_API_KEY exists:", !!process.env.OPENAI_API_KEY);
+
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
