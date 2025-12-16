@@ -1,175 +1,197 @@
+// index.js
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import twilio from "twilio";
-import OpenAI from "openai";
+
+/* ----------------------------
+   APP SETUP
+----------------------------- */
 
 const app = express();
 app.use(cors());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-/* ------------------------
-   CONFIG
-------------------------- */
+/* ----------------------------
+   OPENAI (SAFE INIT)
+----------------------------- */
 
-const openai = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  : null;
+let openai = null;
+
+async function initOpenAI() {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn("⚠️ OPENAI_API_KEY missing — mock mode enabled");
+      return;
+    }
+    const OpenAI = (await import("openai")).default;
+    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    console.log("✅ OpenAI ready");
+  } catch (err) {
+    console.warn("⚠️ OpenAI init failed:", err.message);
+  }
+}
+initOpenAI();
 
 function isMockMode() {
   return !openai || process.env.MOCK_AI === "true";
 }
 
-/* ------------------------
+/* ----------------------------
    FULL PIZZA 64 MENU
-------------------------- */
+----------------------------- */
 
-const MENU = {
-  pizzas: [
-    {
-      id: "butter_chicken",
-      name: "Butter Chicken Pizza",
-      spicy: true,
-      sizes: { Small: 9.99, Medium: 13.99, Large: 17.99 },
-      toppings: ["cilantro", "jalapeños", "extra cheese"],
-    },
-    {
-      id: "tandoori_chicken",
-      name: "Tandoori Chicken Pizza",
-      spicy: true,
-      sizes: { Small: 10.99, Medium: 14.99, Large: 18.99 },
-      toppings: ["cilantro", "onions", "jalapeños"],
-    },
-    {
-      id: "shahi_paneer",
-      name: "Shahi Paneer Pizza",
-      spicy: true,
-      sizes: { Small: 9.49, Medium: 13.49, Large: 16.99 },
-      toppings: ["spinach", "cilantro", "extra cheese"],
-    },
-    {
-      id: "hawaiian",
-      name: "Hawaiian Pizza",
-      spicy: false,
-      sizes: { Small: 8.99, Medium: 12.99, Large: 15.99 },
-      toppings: ["pineapple", "extra cheese"],
-    },
-    {
-      id: "veggie",
-      name: "Pesto Veggie Pizza",
-      spicy: false,
-      sizes: { Small: 8.49, Medium: 12.49, Large: 15.49 },
-      toppings: ["spinach", "olives", "onions"],
-    },
-  ],
-};
+const MENU = [
+  {
+    name: "Butter Chicken Pizza",
+    spicy: true,
+    prices: { Small: 9.99, Medium: 13.99, Large: 17.99 },
+  },
+  {
+    name: "Tandoori Chicken Pizza",
+    spicy: true,
+    prices: { Small: 10.99, Medium: 14.99, Large: 18.99 },
+  },
+  {
+    name: "Shahi Paneer Pizza",
+    spicy: true,
+    prices: { Small: 9.49, Medium: 13.49, Large: 16.99 },
+  },
+  {
+    name: "Hawaiian Pizza",
+    spicy: false,
+    prices: { Small: 8.99, Medium: 12.99, Large: 15.99 },
+  },
+  {
+    name: "Veggie Pizza",
+    spicy: false,
+    prices: { Small: 8.49, Medium: 12.49, Large: 15.49 },
+  },
+];
 
-/* ------------------------
-   STATE (in-memory)
-------------------------- */
+/* ----------------------------
+   SESSION STORE
+----------------------------- */
 
 const sessions = new Map();
 
 function getSession(callSid) {
   if (!sessions.has(callSid)) {
-    sessions.set(callSid, {
-      order: null,
-      history: [],
-      confirmed: false,
-    });
+    sessions.set(callSid, { confirmed: false });
   }
   return sessions.get(callSid);
 }
 
-/* ------------------------
-   OPENAI PROMPTS
-------------------------- */
-
-const SYSTEM_PROMPT = `
-You are a friendly Pizza 64 phone assistant.
-
-Style rules:
-- Sound human, warm, and casual
-- Short sentences
-- Suggest options naturally
-- Answer menu and price questions clearly
-- Guide toward completing the order
-`;
-
-/* ------------------------
+/* ----------------------------
    INTENT DETECTION
-------------------------- */
+----------------------------- */
 
 async function detectIntent(text) {
+  const t = text.toLowerCase();
+
   if (isMockMode()) {
-    if (text.toLowerCase().includes("menu")) return { intent: "ASK_MENU" };
-    if (text.toLowerCase().includes("price")) return { intent: "ASK_PRICE" };
-    if (text.toLowerCase().includes("yes")) return { intent: "CONFIRM" };
-    return { intent: "PLACE_ORDER" };
+    if (t.includes("menu")) return "ASK_MENU";
+    if (t.includes("price") || t.includes("how much")) return "ASK_PRICE";
+    if (t.includes("yes") || t.includes("correct")) return "CONFIRM";
+    return "ORDER";
   }
 
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: "Classify intent only." },
-      {
-        role: "user",
-        content: `
-User said: "${text}"
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "Classify intent only." },
+        {
+          role: "user",
+          content: `User said: "${text}"
+Return one word:
+ASK_MENU | ASK_PRICE | ORDER | CONFIRM | OTHER`,
+        },
+      ],
+      temperature: 0,
+    });
 
-Return JSON:
-{
-  "intent": "ASK_MENU | ASK_PRICE | PLACE_ORDER | MODIFY_ORDER | CONFIRM | UNKNOWN"
+    return res.choices[0].message.content.trim();
+  } catch {
+    return "OTHER";
+  }
 }
-`,
-      },
-    ],
-    temperature: 0,
-  });
 
-  return JSON.parse(res.choices[0].message.content);
+/* ----------------------------
+   MENU HELPERS
+----------------------------- */
+
+function readMenu() {
+  return MENU.map((p) => p.name).join(", ");
 }
 
-/* ------------------------
-   HUMAN RESPONSE
-------------------------- */
+function findPizza(text) {
+  return MENU.find((p) =>
+    text.toLowerCase().includes(p.name.toLowerCase().split(" ")[0])
+  );
+}
 
-async function generateReply(context) {
+function priceLine(pizza) {
+  return `Small $${pizza.prices.Small}, Medium $${pizza.prices.Medium}, Large $${pizza.prices.Large}.`;
+}
+
+/* ----------------------------
+   HUMAN RESPONSES
+----------------------------- */
+
+async function buildReply(intent, speech) {
   if (isMockMode()) {
-    if (context.intent === "ASK_MENU")
-      return "We have Butter Chicken, Tandoori Chicken, Shahi Paneer, Hawaiian, and Veggie pizzas. Want prices or want to order?";
+    if (intent === "ASK_MENU")
+      return `We have ${readMenu()}. What sounds good today?`;
 
-    if (context.intent === "CONFIRM")
-      return "Perfect! Your order is confirmed. Thanks for calling Pizza 64.";
+    if (intent === "ASK_PRICE") {
+      const pizza = findPizza(speech);
+      return pizza
+        ? `${pizza.name} prices are ${priceLine(pizza)}`
+        : "Which pizza are you asking about?";
+    }
 
-    return "Sounds good. Tell me what pizza you’d like.";
+    if (intent === "CONFIRM")
+      return "Perfect, your order is confirmed. Thanks for calling Pizza 64!";
+
+    return "Sure. Tell me what pizza you’d like to order.";
   }
 
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: JSON.stringify(context, null, 2),
-      },
-    ],
-    temperature: 0.7,
-  });
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a friendly Pizza 64 phone assistant. Speak naturally and briefly.",
+        },
+        {
+          role: "user",
+          content: `Intent: ${intent}
+User said: "${speech}"
+Menu: ${JSON.stringify(MENU)}`,
+        },
+      ],
+      temperature: 0.7,
+    });
 
-  return res.choices[0].message.content;
+    return res.choices[0].message.content;
+  } catch {
+    return "Sorry, can you repeat that?";
+  }
 }
 
-/* ------------------------
+/* ----------------------------
    TWILIO ENTRY
-------------------------- */
+----------------------------- */
 
 app.all("/twilio/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
   twiml.say({ voice: "alice" }, "Hi! Thanks for calling Pizza 64.");
-  twiml.say({ voice: "alice" }, "How can I help you today?");
+  twiml.say({ voice: "alice" }, "What can I help you with today?");
 
   const gather = twiml.gather({
     input: "speech",
@@ -183,29 +205,23 @@ app.all("/twilio/voice", (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-/* ------------------------
-   MAIN CONVERSATION LOOP
-------------------------- */
+/* ----------------------------
+   MAIN LOOP
+----------------------------- */
 
 app.post("/twilio/step", async (req, res) => {
-  const callSid = req.body.CallSid;
+  const callSid = req.body.CallSid || "unknown";
   const speech = req.body.SpeechResult || "";
   const session = getSession(callSid);
 
-  const intentData = await detectIntent(speech);
-  session.history.push({ user: speech, intent: intentData.intent });
+  const intent = await detectIntent(speech);
 
-  if (intentData.intent === "CONFIRM") {
+  if (intent === "CONFIRM") {
     session.confirmed = true;
     sessions.delete(callSid);
   }
 
-  const reply = await generateReply({
-    intent: intentData.intent,
-    menu: MENU,
-    order: session.order,
-    history: session.history,
-  });
+  const reply = await buildReply(intent, speech);
 
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.say({ voice: "alice" }, reply);
@@ -223,13 +239,19 @@ app.post("/twilio/step", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-/* ------------------------
-   SERVER
-------------------------- */
+/* ----------------------------
+   HEALTH CHECK
+----------------------------- */
 
-app.get("/health", (_, res) => res.json({ status: "ok" }));
+app.get("/health", (_, res) => {
+  res.json({ status: "ok", mockMode: isMockMode() });
+});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`🍕 Pizza 64 AI running on port ${PORT}`)
-);
+/* ----------------------------
+   START SERVER
+----------------------------- */
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🍕 Pizza 64 AI running on port ${PORT}`);
+});
