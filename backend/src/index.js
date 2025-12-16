@@ -1,9 +1,7 @@
 // index.js
-console.log("ENV CHECK - OPENAI_API_KEY exists:", !!process.env.OPENAI_API_KEY);
-
+import "dotenv/config";               // ✅ MUST be first
 import express from "express";
 import cors from "cors";
-import "dotenv/config";
 import twilio from "twilio";
 
 /* =========================
@@ -15,9 +13,15 @@ app.use(cors());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+console.log(
+  "ENV CHECK - OPENAI_API_KEY exists:",
+  !!process.env.OPENAI_API_KEY
+);
+
 /* =========================
-   OPENAI (REAL AI)
+   OPENAI (LAZY + SAFE)
 ========================= */
+
 let openai = null;
 
 async function getOpenAI() {
@@ -42,40 +46,17 @@ async function getOpenAI() {
   }
 }
 
-function isAIEnabled() {
-  return !!openai;
-}
-
 /* =========================
-   FULL MENU
+   MENU
 ========================= */
 
 const MENU = [
-  {
-    name: "Butter Chicken Pizza",
-    prices: { Small: 9.99, Medium: 13.99, Large: 17.99 },
-  },
-  {
-    name: "Tandoori Chicken Pizza",
-    prices: { Small: 10.99, Medium: 14.99, Large: 18.99 },
-  },
-  {
-    name: "Shahi Paneer Pizza",
-    prices: { Small: 9.49, Medium: 13.49, Large: 16.99 },
-  },
-  {
-    name: "Hawaiian Pizza",
-    prices: { Small: 8.99, Medium: 12.99, Large: 15.99 },
-  },
-  {
-    name: "Veggie Pizza",
-    prices: { Small: 8.49, Medium: 12.49, Large: 15.49 },
-  },
+  { name: "Butter Chicken Pizza", prices: { Small: 9.99, Medium: 13.99, Large: 17.99 } },
+  { name: "Tandoori Chicken Pizza", prices: { Small: 10.99, Medium: 14.99, Large: 18.99 } },
+  { name: "Shahi Paneer Pizza", prices: { Small: 9.49, Medium: 13.49, Large: 16.99 } },
+  { name: "Hawaiian Pizza", prices: { Small: 8.99, Medium: 12.99, Large: 15.99 } },
+  { name: "Veggie Pizza", prices: { Small: 8.49, Medium: 12.49, Large: 15.49 } },
 ];
-
-/* =========================
-   HELPERS
-========================= */
 
 function findPizza(text) {
   return MENU.find(p =>
@@ -88,13 +69,18 @@ function findPizza(text) {
 ========================= */
 
 async function detectIntent(text) {
-  if (!isAIEnabled()) return "ORDER";
+  const client = await getOpenAI();     // ✅ THIS WAS MISSING
+
+  if (!client) {
+    console.log("⚠️ AI unavailable → fallback intent");
+    return "ORDER";
+  }
 
   try {
-    const res = await openai.chat.completions.create({
+    const res = await client.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "Classify user intent only." },
+        { role: "system", content: "Classify intent only." },
         {
           role: "user",
           content: `User said: "${text}"
@@ -109,19 +95,18 @@ ASK_MENU | ASK_PRICE | ORDER | CONFIRM | OTHER`,
     console.log("🧠 Intent:", intent);
     return intent;
   } catch (err) {
-    console.error("Intent AI error:", err.message);
+    console.error("❌ Intent AI error:", err.message);
     return "OTHER";
   }
 }
 
 /* =========================
-   RESPONSE GENERATION (REAL AI)
+   RESPONSE
 ========================= */
 
 async function buildReply(intent, speech) {
-  // Code-first answers (safe)
   if (intent === "ASK_MENU") {
-    return `We have ${MENU.map(p => p.name).join(", ")}. What would you like?`;
+    return `We have ${MENU.map(p => p.name).join(", ")}.`;
   }
 
   if (intent === "ASK_PRICE") {
@@ -135,34 +120,27 @@ async function buildReply(intent, speech) {
     return "Perfect. Your order is confirmed. Thanks for calling Pizza 64!";
   }
 
-  // Natural AI response for everything else
-  if (!isAIEnabled()) {
-    return "Sure — tell me what pizza you’d like.";
-  }
+  const client = await getOpenAI();
+  if (!client) return "Sure — tell me what pizza you’d like.";
 
   try {
-    const res = await openai.chat.completions.create({
+    const res = await client.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        {
-          role: "system",
-          content:
-            "You are a friendly Pizza 64 phone assistant. Be short and natural.",
-        },
+        { role: "system", content: "You are a friendly Pizza 64 assistant." },
         { role: "user", content: speech },
       ],
       temperature: 0.7,
     });
 
     return res.choices[0].message.content;
-  } catch (err) {
-    console.error("Reply AI error:", err.message);
+  } catch {
     return "Sorry, could you repeat that?";
   }
 }
 
 /* =========================
-   TWILIO ENTRY
+   TWILIO ROUTES
 ========================= */
 
 app.post("/twilio/voice", (req, res) => {
@@ -171,21 +149,15 @@ app.post("/twilio/voice", (req, res) => {
   twiml.say({ voice: "alice" }, "Hi, thanks for calling Pizza 64.");
   twiml.say({ voice: "alice" }, "How can I help you today?");
 
-  const gather = twiml.gather({
+  twiml.gather({
     input: "speech",
     action: "/twilio/step",
     method: "POST",
     speechTimeout: "auto",
   });
 
-  gather.say({ voice: "alice" }, "Go ahead.");
-
   res.type("text/xml").send(twiml.toString());
 });
-
-/* =========================
-   MAIN LOOP
-========================= */
 
 app.post("/twilio/step", async (req, res) => {
   const speech = req.body.SpeechResult || "";
@@ -197,13 +169,12 @@ app.post("/twilio/step", async (req, res) => {
   twiml.say({ voice: "alice" }, reply);
 
   if (intent !== "CONFIRM") {
-    const gather = twiml.gather({
+    twiml.gather({
       input: "speech",
       action: "/twilio/step",
       method: "POST",
       speechTimeout: "auto",
     });
-    gather.say({ voice: "alice" }, "Anything else?");
   }
 
   res.type("text/xml").send(twiml.toString());
@@ -221,7 +192,6 @@ app.get("/health", async (_, res) => {
     aiEnabled: !!client,
   });
 });
-
 
 /* =========================
    START SERVER
