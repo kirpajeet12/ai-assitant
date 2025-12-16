@@ -18,25 +18,29 @@ app.use(express.json());
 /* =========================
    OPENAI (REAL AI)
 ========================= */
-
 let openai = null;
 
-async function initOpenAI() {
+async function getOpenAI() {
+  if (openai) return openai;
+
+  if (!process.env.OPENAI_API_KEY) {
+    console.error("❌ OPENAI_API_KEY missing at runtime");
+    return null;
+  }
+
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      console.warn("❌ OPENAI_API_KEY missing — AI disabled");
-      return;
-    }
+    const { default: OpenAI } = await import("openai");
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
 
-    const OpenAI = (await import("openai")).default;
-    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-    console.log("✅ OpenAI connected (REAL AI MODE)");
+    console.log("✅ OpenAI client CREATED");
+    return openai;
   } catch (err) {
-    console.error("❌ OpenAI init failed:", err.message);
+    console.error("❌ Failed to create OpenAI client:", err.message);
+    return null;
   }
 }
-await initOpenAI();
 
 function isAIEnabled() {
   return !!openai;
@@ -209,12 +213,15 @@ app.post("/twilio/step", async (req, res) => {
    HEALTH CHECK
 ========================= */
 
-app.get("/health", (_, res) => {
+app.get("/health", async (_, res) => {
+  const client = await getOpenAI();
+
   res.json({
     status: "ok",
-    aiEnabled: isAIEnabled(),
+    aiEnabled: !!client,
   });
 });
+
 
 /* =========================
    START SERVER
