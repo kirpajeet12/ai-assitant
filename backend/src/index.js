@@ -1,5 +1,5 @@
 // index.js
-import "dotenv/config";               // ✅ MUST be first
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import twilio from "twilio";
@@ -19,7 +19,7 @@ console.log(
 );
 
 /* =========================
-   OPENAI (LAZY + SAFE)
+   OPENAI (LAZY INIT)
 ========================= */
 
 let openai = null;
@@ -28,119 +28,191 @@ async function getOpenAI() {
   if (openai) return openai;
 
   if (!process.env.OPENAI_API_KEY) {
-    console.error("❌ OPENAI_API_KEY missing at runtime");
+    console.error("❌ OPENAI_API_KEY missing");
     return null;
   }
 
-  try {
-    const { default: OpenAI } = await import("openai");
-    openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+  const { default: OpenAI } = await import("openai");
+  openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    console.log("✅ OpenAI client CREATED");
-    return openai;
-  } catch (err) {
-    console.error("❌ Failed to create OpenAI client:", err.message);
-    return null;
-  }
+  console.log("✅ OpenAI client CREATED");
+  return openai;
 }
 
 /* =========================
-   MENU
+   PIZZA 64 MENU
 ========================= */
 
 const MENU = [
-  { name: "Butter Chicken Pizza", prices: { Small: 9.99, Medium: 13.99, Large: 17.99 } },
-  { name: "Tandoori Chicken Pizza", prices: { Small: 10.99, Medium: 14.99, Large: 18.99 } },
-  { name: "Shahi Paneer Pizza", prices: { Small: 9.49, Medium: 13.49, Large: 16.99 } },
-  { name: "Hawaiian Pizza", prices: { Small: 8.99, Medium: 12.99, Large: 15.99 } },
-  { name: "Veggie Pizza", prices: { Small: 8.49, Medium: 12.49, Large: 15.49 } },
+  {
+    name: "Butter Chicken Pizza",
+    description: "Creamy butter chicken, mozzarella, onions, cilantro",
+    prices: { Small: 9.99, Medium: 13.99, Large: 17.99 },
+    spicy: true,
+  },
+  {
+    name: "Tandoori Chicken Pizza",
+    description: "Tandoori chicken, bell peppers, onions, mozzarella",
+    prices: { Small: 10.99, Medium: 14.99, Large: 18.99 },
+    spicy: true,
+  },
+  {
+    name: "Shahi Paneer Pizza",
+    description: "Paneer in rich gravy, onions, green peppers",
+    prices: { Small: 9.49, Medium: 13.49, Large: 16.99 },
+    spicy: true,
+  },
+  {
+    name: "Hawaiian Pizza",
+    description: "Chicken ham, pineapple, mozzarella",
+    prices: { Small: 8.99, Medium: 12.99, Large: 15.99 },
+    spicy: false,
+  },
+  {
+    name: "Veggie Pizza",
+    description: "Onions, bell peppers, olives, mushrooms",
+    prices: { Small: 8.49, Medium: 12.49, Large: 15.49 },
+    spicy: false,
+  }
 ];
 
-function findPizza(text) {
-  return MENU.find(p =>
-    text.toLowerCase().includes(p.name.toLowerCase().split(" ")[0])
-  );
-}
-
 /* =========================
-   INTENT DETECTION (REAL AI)
+   SYSTEM PROMPT (THE BRAIN)
 ========================= */
 
-async function detectIntent(text) {
-  const client = await getOpenAI();     // ✅ THIS WAS MISSING
+const SYSTEM_PROMPT = `
+You are a real human employee answering the phone at Pizza 64.
 
-  if (!client) {
-    console.log("⚠️ AI unavailable → fallback intent");
-    return "ORDER";
-  }
+Speak naturally, friendly, and casually.
+Never sound robotic or scripted.
+Keep replies short (1–2 sentences).
+Ask one question at a time.
 
-  try {
-    const res = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "Classify intent only." },
-        {
-          role: "user",
-          content: `User said: "${text}"
-Return ONE word:
-ASK_MENU | ASK_PRICE | ORDER | CONFIRM | OTHER`,
-        },
-      ],
-      temperature: 0,
+Menu:
+${MENU.map(p => `
+- ${p.name}
+  (${p.description})
+  Small $${p.prices.Small}, Medium $${p.prices.Medium}, Large $${p.prices.Large}
+`).join("\n")}
+
+Rules:
+- Help customers order naturally
+- Answer menu and price questions
+- Guide ordering step by step
+- Ask for size, spice level if applicable, and extras
+- Confirm the full order before finishing
+- Never mention AI, OpenAI, or systems
+`;
+
+/* =========================
+   SESSIONS (MEMORY + ORDER)
+========================= */
+
+const sessions = new Map();
+
+function emptyOrder() {
+  return {
+    items: [],
+    orderType: "pickup",
+    address: null,
+  };
+}
+
+function getSession(callSid) {
+  if (!sessions.has(callSid)) {
+    sessions.set(callSid, {
+      messages: [],
+      order: emptyOrder(),
+      awaitingConfirmation: false,
+      confirmed: false,
     });
-
-    const intent = res.choices[0].message.content.trim();
-    console.log("🧠 Intent:", intent);
-    return intent;
-  } catch (err) {
-    console.error("❌ Intent AI error:", err.message);
-    return "OTHER";
   }
+  return sessions.get(callSid);
 }
 
 /* =========================
-   RESPONSE
+   CHATGPT-STYLE REPLY
 ========================= */
 
-async function buildReply(intent, speech) {
-  if (intent === "ASK_MENU") {
-    return `We have ${MENU.map(p => p.name).join(", ")}.`;
-  }
-
-  if (intent === "ASK_PRICE") {
-    const pizza = findPizza(speech);
-    return pizza
-      ? `${pizza.name} prices are small $${pizza.prices.Small}, medium $${pizza.prices.Medium}, and large $${pizza.prices.Large}.`
-      : "Which pizza are you asking about?";
-  }
-
-  if (intent === "CONFIRM") {
-    return "Perfect. Your order is confirmed. Thanks for calling Pizza 64!";
-  }
-
+async function buildReply(session, userSpeech) {
   const client = await getOpenAI();
-  if (!client) return "Sure — tell me what pizza you’d like.";
+  if (!client) return "Sorry, I’m having trouble right now.";
 
-  try {
-    const res = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are a friendly Pizza 64 assistant." },
-        { role: "user", content: speech },
-      ],
-      temperature: 0.7,
-    });
+  session.messages.push({ role: "user", content: userSpeech });
 
-    return res.choices[0].message.content;
-  } catch {
-    return "Sorry, could you repeat that?";
-  }
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...session.messages.slice(-12),
+  ];
+
+  const res = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages,
+    temperature: 0.6,
+  });
+
+  const reply = res.choices[0].message.content.trim();
+  session.messages.push({ role: "assistant", content: reply });
+
+  return reply;
 }
 
 /* =========================
-   TWILIO ROUTES
+   ORDER EXTRACTION (TICKET)
+========================= */
+
+async function extractOrder(session) {
+  const client = await getOpenAI();
+  if (!client) return null;
+
+  const res = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: `
+Extract the customer's pizza order from the conversation.
+
+Return STRICT JSON only.
+
+Schema:
+{
+  "items": [
+    {
+      "name": string,
+      "size": "Small" | "Medium" | "Large",
+      "quantity": number,
+      "extras": string[],
+      "spiceLevel": "Mild" | "Medium" | "Hot" | null
+    }
+  ],
+  "orderType": "pickup" | "delivery",
+  "address": string | null
+}
+`
+      },
+      ...session.messages.slice(-15),
+    ],
+    temperature: 0,
+  });
+
+  try {
+    return JSON.parse(res.choices[0].message.content);
+  } catch {
+    return null;
+  }
+}
+
+function buildConfirmation(order) {
+  const items = order.items
+    .map(i => `${i.quantity} ${i.size} ${i.name}`)
+    .join(", ");
+
+  return `Just to confirm, I have ${items} for ${order.orderType}. Is that correct?`;
+}
+
+/* =========================
+   TWILIO ENTRY
 ========================= */
 
 app.post("/twilio/voice", (req, res) => {
@@ -159,23 +231,65 @@ app.post("/twilio/voice", (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
+/* =========================
+   MAIN CONVERSATION LOOP
+========================= */
+
 app.post("/twilio/step", async (req, res) => {
-  const speech = req.body.SpeechResult || "";
+  const callSid = req.body.CallSid || "unknown";
+  const speech = (req.body.SpeechResult || "").trim();
 
-  const intent = await detectIntent(speech);
-  const reply = await buildReply(intent, speech);
-
+  const session = getSession(callSid);
   const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say({ voice: "alice" }, reply);
 
-  if (intent !== "CONFIRM") {
+  // If awaiting confirmation
+  if (session.awaitingConfirmation) {
+    if (speech.toLowerCase().includes("yes")) {
+      session.confirmed = true;
+
+      console.log("🎟️ FINAL ORDER TICKET:");
+      console.log(JSON.stringify(session.order, null, 2));
+
+      twiml.say(
+        { voice: "alice" },
+        "Perfect. Your order is confirmed. Thank you for calling Pizza 64!"
+      );
+
+      sessions.delete(callSid);
+      return res.type("text/xml").send(twiml.toString());
+    } else {
+      session.awaitingConfirmation = false;
+      twiml.say({ voice: "alice" }, "No problem, let’s fix it.");
+    }
+  }
+
+  // Try extracting order
+  const extracted = await extractOrder(session);
+  if (extracted && extracted.items?.length) {
+    session.order = extracted;
+    session.awaitingConfirmation = true;
+
+    twiml.say({ voice: "alice" }, buildConfirmation(extracted));
     twiml.gather({
       input: "speech",
       action: "/twilio/step",
       method: "POST",
       speechTimeout: "auto",
     });
+
+    return res.type("text/xml").send(twiml.toString());
   }
+
+  // Normal chat reply
+  const reply = await buildReply(session, speech);
+  twiml.say({ voice: "alice" }, reply);
+
+  twiml.gather({
+    input: "speech",
+    action: "/twilio/step",
+    method: "POST",
+    speechTimeout: "auto",
+  });
 
   res.type("text/xml").send(twiml.toString());
 });
@@ -186,11 +300,7 @@ app.post("/twilio/step", async (req, res) => {
 
 app.get("/health", async (_, res) => {
   const client = await getOpenAI();
-
-  res.json({
-    status: "ok",
-    aiEnabled: !!client,
-  });
+  res.json({ status: "ok", aiEnabled: !!client });
 });
 
 /* =========================
