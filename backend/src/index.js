@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import twilio from "twilio";
 import path from "path";
-app.use(express.static(path.join(process.cwd(), "public")));
+/*app.use(express.static(path.join(process.cwd(), "public")));*/
 
 
 /* =========================
