@@ -31,10 +31,7 @@ async function getOpenAI() {
    TWILIO CLIENT (SMS)
 ========================= */
 
-const smsClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+
 
 /* =========================
    MENU & EXTRAS
@@ -412,7 +409,7 @@ ${order.extras?.length
    SEND SMS SUMMARY
 ========================= */
 
-async function sendSMS(order) {
+/*async function sendSMS(order) {
   if (!order.phone) return;
 
   const body = `
@@ -429,7 +426,7 @@ Thank you for ordering with Pizza 64!
     to: order.phone,
     body
   });
-}
+}*/
 
 /* =========================
    TWILIO ROUTES
@@ -466,6 +463,25 @@ app.post("/twilio/step", async (req, res) => {
     twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
     return res.type("text/xml").send(twiml.toString());
   }
+   if (session.awaitingConfirmation) {
+  if (/yes|correct|yeah/i.test(speech.toLowerCase())) {
+
+    console.log("🧾 CUSTOMER RECEIPT:");
+    console.log(buildReceipt(session.order));
+
+    console.log("👨‍🍳 KITCHEN TICKET:");
+    console.log(buildKitchenTicket(session.order));
+
+    twiml.say("Perfect. Your order is confirmed. See you soon!");
+    sessions.delete(callSid);
+    return res.type("text/xml").send(twiml.toString());
+  } else {
+    session.awaitingConfirmation = false;
+    twiml.say("No problem, what would you like to change?");
+  }
+}
+
+   /*
 if (session.awaitingConfirmation) {
   if (/yes|correct|yeah/i.test(speech.toLowerCase())) {
 
@@ -485,7 +501,7 @@ if (session.awaitingConfirmation) {
     session.awaitingConfirmation = false;
     twiml.say("No problem, what would you like to change?");
   }
-}
+}*/
 
 
   if (session.readyToExtract) {
