@@ -228,9 +228,8 @@ async function chatReply(session, speech) {
   const reply = res.choices[0].message.content.trim();
   session.messages.push({ role: "assistant", content: reply });
 
-  return res.json({
-  reply: "Perfect! Your order is confirmed and has been sent to the kitchen. That’s all for today — see you soon 😊"
-});
+return reply;
+
 
 }
 
@@ -492,16 +491,17 @@ app.post("/twilio/step", async (req, res) => {
   }
 }
 
-   /*
+   
 if (session.awaitingConfirmation) {
-  if (/yes|correct|yeah/i.test(speech.toLowerCase())) {
+  if (/yes|correct|yeah/i.test(message.toLowerCase())) {
+    console.log("🧾 RECEIPT:\n", buildReceipt(session.order));
+    console.log("👨‍🍳 KITCHEN:\n", buildKitchenTicket(session.order));
+    sessions.delete(sessionId);
+    return res.json({ reply: "Perfect. Your order is confirmed!" });
+  }
+}
 
-    console.log("🧾 CUSTOMER RECEIPT:");
-    console.log(buildReceipt(session.order));
-
-    console.log("👨‍🍳 KITCHEN TICKET:");
-    console.log(buildKitchenTicket(session.order));
-
+/*
     // Send receipt via SMS
     await sendSMS(session.order.phone, buildReceipt(session.order));
 
