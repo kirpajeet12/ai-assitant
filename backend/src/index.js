@@ -332,6 +332,81 @@ function buildConfirmation(order) {
 
   return `Just confirming — ${pizzas}${extras}, ${where}. Is that correct?`;
 }
+/* =========================
+   RECEIPT & KITCHEN TICKET
+========================= */
+
+function buildReceipt(order) {
+  const TAX_RATE = 0.13;
+  let subtotal = 0;
+
+  const itemsText = order.items.map(i => {
+    const price = i.price || 0;
+    subtotal += price * i.quantity;
+    return `${i.quantity} x ${i.size} ${i.name}  $${(price * i.quantity).toFixed(2)}`;
+  }).join("\n");
+
+  const extrasText = order.extras?.length
+    ? order.extras.map(e => {
+        subtotal += e.price;
+        return `${e.name}  $${e.price.toFixed(2)}`;
+      }).join("\n")
+    : "None";
+
+  const tax = subtotal * TAX_RATE;
+  const total = subtotal + tax;
+
+  return `
+🍕 PIZZA 64 RECEIPT 🍕
+
+Items:
+${itemsText}
+
+Extras:
+${extrasText}
+
+Order Type: ${order.orderType}
+${order.orderType === "delivery" ? "Address: " + order.address : ""}
+
+Subtotal: $${subtotal.toFixed(2)}
+Tax (13%): $${tax.toFixed(2)}
+TOTAL: $${total.toFixed(2)}
+
+Thank you for ordering!
+`;
+}
+
+function buildKitchenTicket(order) {
+  const time = new Date().toLocaleTimeString();
+
+  return `
+========================
+🍕  PIZZA 64 - KITCHEN
+========================
+TIME: ${time}
+TYPE: ${order.orderType.toUpperCase()}
+
+${order.orderType === "delivery" ? "DELIVERY ADDRESS:\n" + order.address : ""}
+
+------------------------
+ITEMS:
+------------------------
+${order.items.map(i => `
+${i.quantity} x ${i.size} ${i.name}
+Spice: ${i.spiceLevel || "Regular"}
+Extras: ${i.extras?.length ? i.extras.join(", ") : "None"}
+`).join("\n")}
+
+------------------------
+SIDE EXTRAS:
+------------------------
+${order.extras?.length
+  ? order.extras.map(e => `- ${e.name}`).join("\n")
+  : "None"}
+
+========================
+`;
+}
 
 /* =========================
    SEND SMS SUMMARY
@@ -343,15 +418,16 @@ async function sendSMS(order) {
   const body = `
 Pizza 64 Order 🍕
 ${order.items.map(i => `• ${i.quantity} ${i.size} ${i.name}`).join("\n")}
-${order.extras.length ? "Extras: " + order.extras.join(", ") : ""}
+${order.extras?.length ? "Extras: " + order.extras.join(", ") : ""}
 ${order.orderType === "delivery" ? "Delivery to: " + order.address : "Pickup"}
-Thanks for ordering!
+
+Thank you for ordering with Pizza 64!
 `;
 
   await smsClient.messages.create({
-    body,
     from: process.env.TWILIO_PHONE_NUMBER,
-    to: order.phone
+    to: order.phone,
+    body
   });
 }
 
@@ -390,18 +466,27 @@ app.post("/twilio/step", async (req, res) => {
     twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
     return res.type("text/xml").send(twiml.toString());
   }
+if (session.awaitingConfirmation) {
+  if (/yes|correct|yeah/i.test(speech.toLowerCase())) {
 
-  if (session.awaitingConfirmation) {
-    if (/yes|correct|yeah/i.test(speech.toLowerCase())) {
-      await sendSMS(session.order);
-      twiml.say("Perfect. Your order is confirmed. See you soon!");
-      sessions.delete(callSid);
-      return res.type("text/xml").send(twiml.toString());
-    } else {
-      session.awaitingConfirmation = false;
-      twiml.say("No problem, what would you like to change?");
-    }
+    console.log("🧾 CUSTOMER RECEIPT:");
+    console.log(buildReceipt(session.order));
+
+    console.log("👨‍🍳 KITCHEN TICKET:");
+    console.log(buildKitchenTicket(session.order));
+
+    // Send receipt via SMS
+    await sendSMS(session.order.phone, buildReceipt(session.order));
+
+    twiml.say("Perfect. Your order is confirmed. See you soon!");
+    sessions.delete(callSid);
+    return res.type("text/xml").send(twiml.toString());
+  } else {
+    session.awaitingConfirmation = false;
+    twiml.say("No problem, what would you like to change?");
   }
+}
+
 
   if (session.readyToExtract) {
     const extracted = await extractOrder(session);
