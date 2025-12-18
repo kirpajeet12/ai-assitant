@@ -519,6 +519,55 @@ if (session.awaitingConfirmation) {
 
   res.type("text/xml").send(twiml.toString());
 });
+/* =========================
+   CHAT TEST ENDPOINT
+========================= */
+
+app.post("/chat", async (req, res) => {
+  const { sessionId, message } = req.body;
+
+  const session = getSession(sessionId, "+10000000000");
+  detectIntent(session, message);
+
+  // Address capture
+  if (captureAddress(session, message)) {
+    return res.json({ reply: "Got it. Anything else you'd like?" });
+  }
+
+  // Confirmation
+  if (session.awaitingConfirmation) {
+    if (/yes|correct|yeah/i.test(message.toLowerCase())) {
+      console.log("🧾 RECEIPT:\n", buildReceipt(session.order));
+      console.log("👨‍🍳 KITCHEN:\n", buildKitchenTicket(session.order));
+      sessions.delete(sessionId);
+      return res.json({ reply: "Perfect. Your order is confirmed!" });
+    } else {
+      session.awaitingConfirmation = false;
+      return res.json({ reply: "No worries, what would you like to change?" });
+    }
+  }
+
+  // Extract order
+  if (session.readyToExtract) {
+    const extracted = await extractOrder(session);
+    if (extracted?.items?.length) {
+      session.order = { ...session.order, ...extracted };
+      session.awaitingConfirmation = true;
+      return res.json({ reply: buildConfirmation(session.order) });
+    }
+  }
+
+  // Upsell
+  const upsell = maybeUpsell(session);
+  if (upsell) {
+    return res.json({ reply: upsell });
+  }
+
+  // Normal chat
+  const reply = await chatReply(session, message);
+  res.json({ reply });
+});
+
 
 /* =========================
    SERVER
@@ -528,3 +577,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🍕 Pizza 64 AI running on port ${PORT}`);
 });
+
