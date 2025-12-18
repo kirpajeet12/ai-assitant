@@ -228,7 +228,10 @@ async function chatReply(session, speech) {
   const reply = res.choices[0].message.content.trim();
   session.messages.push({ role: "assistant", content: reply });
 
-  return reply;
+  return res.json({
+  reply: "Perfect! Your order is confirmed and has been sent to the kitchen. That’s all for today — see you soon 😊"
+});
+
 }
 
 /* =========================
