@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Pizza 64 – Chat Agent Test</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f7f7f7;
+      padding: 16px;
+    }
+    #chat {
+      max-width: 700px;
+      margin: auto;
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    #messages {
+      min-height: 300px;
+      max-height: 420px;
+      overflow-y: auto;
+      margin-bottom: 12px;
+    }
+    .msg { margin: 8px 0; }
+    .user { text-align: right; }
+    .bot { text-align: left; color: #d35400; }
+    input {
+      width: 80%;
+      padding: 10px;
+      font-size: 14px;
+    }
+    button {
+      padding: 10px 14px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+
+<h2 style="text-align:center;">🍕 Pizza 64 – Chat Agent Test</h2>
+
+<div id="chat">
+  <div id="messages"></div>
+  <input id="input" placeholder="Type like a customer..." />
+  <button onclick="send()">Send</button>
+</div>
+
+<script>
+  const sessionId = "chat-test-" + Math.random().toString(36).slice(2);
+  const messagesEl = document.getElementById("messages");
+  const inputEl = document.getElementById("input");
+
+  function add(role, text) {
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    div.textContent = text;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  async function send() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    add("user", text);
+    inputEl.value = "";
+
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, message: text })
+    });
+
+    const data = await res.json();
+    add("bot", data.reply);
+  }
+</script>
+
+</body>
+</html>
