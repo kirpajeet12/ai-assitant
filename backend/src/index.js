@@ -168,6 +168,11 @@ Friendly, casual, short replies.
 Ask one question at a time.
 
 Rules:
+ You must ONLY offer items from the MENU.
+- NEVER invent pizza names.
+- If the user requests an item not in the MENU, clearly say it is NOT available.
+- Then list the valid menu options.
+- Confirm orders ONLY using valid menu items.
 - Never assume an order
 - Never rush confirmation
 - Allow changes anytime
@@ -210,6 +215,7 @@ function getSession(callSid, phone) {
    CHAT REPLY
 ========================= */
 
+
 async function chatReply(session, speech) {
   const client = await getOpenAI();
   if (!client) return "Sorry, we're having a little issue right now.";
@@ -221,6 +227,7 @@ async function chatReply(session, speech) {
     temperature: 0.5,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: `MENU: ${JSON.stringify(MENU)}` },
       ...session.messages.slice(-10)
     ]
   });
@@ -228,9 +235,7 @@ async function chatReply(session, speech) {
   const reply = res.choices[0].message.content.trim();
   session.messages.push({ role: "assistant", content: reply });
 
-return reply;
-
-
+  return reply;
 }
 
 /* =========================
