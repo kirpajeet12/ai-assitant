@@ -1,24 +1,22 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Pizza 64 – Confirmed Orders</title>
+  <title>Confirmed Orders – Pizza 64</title>
   <style>
-    body { font-family: Arial; background:#f7f7f7; padding:20px; }
+    body { font-family: Arial; background:#f7f7f7; padding:20px }
     .ticket {
       background:#fff;
-      padding:12px;
+      padding:15px;
+      margin-bottom:12px;
       border-radius:8px;
-      margin-bottom:10px;
-      box-shadow:0 2px 5px rgba(0,0,0,.1);
+      box-shadow:0 2px 5px rgba(0,0,0,.1)
     }
-    h3 { margin-top:0; color:#d35400; }
+    h3 { margin:0 0 6px }
   </style>
 </head>
 <body>
 
-<h2>🍕 Pizza 64 Kitchen Screen</h2>
-<h3>Confirmed Orders</h3>
-
+<h2>✅ Confirmed Orders</h2>
 <div id="tickets"></div>
 
 <script>
@@ -30,20 +28,23 @@ async function loadTickets() {
   el.innerHTML = "";
 
   tickets.forEach(t => {
-    el.innerHTML += `
-      <div class="ticket">
-        <b>Ticket #${t.id}</b><br>
-        Name: ${t.name}<br>
-        Phone: ${t.phone}<br>
-        Type: ${t.orderType}<br>
-        Items: ${t.items.map(i => i.name).join(", ")}
-      </div>
+    const div = document.createElement("div");
+    div.className = "ticket";
+    div.innerHTML = `
+      <h3>Ticket #${t.ticketNo}</h3>
+      <strong>${t.order.name}</strong> (${t.order.phone})<br>
+      ${t.order.items.map(i =>
+        `${i.size} ${i.name} – ${i.spice}`
+      ).join("<br>")}
+      <br><em>${t.order.orderType.toUpperCase()}</em>
+      <br><small>${t.time}</small>
     `;
+    el.appendChild(div);
   });
 }
 
 loadTickets();
-setInterval(loadTickets, 3000);
+setInterval(loadTickets, 5000);
 </script>
 
 </body>
