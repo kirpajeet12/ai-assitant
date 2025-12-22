@@ -5,17 +5,17 @@ import twilio from "twilio";
 import path from "path";
 import { fileURLToPath } from "url";
 
+/* =========================
+   SETUP
+========================= */
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/* =========================
-   APP SETUP
-========================= */
-
 const app = express();
 app.use(cors());
-app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, "../public")));
 
 /* =========================
@@ -23,7 +23,6 @@ app.use(express.static(path.join(__dirname, "../public")));
 ========================= */
 
 let openai = null;
-
 async function getOpenAI() {
   if (openai) return openai;
   if (!process.env.OPENAI_API_KEY) return null;
@@ -37,102 +36,13 @@ async function getOpenAI() {
 ========================= */
 
 const MENU = [
-  // ======================
-  // SPECIALTY PIZZAS
-  // ======================
-  {
-    name: "Cheese Lovers",
-    category: "Specialty",
-    toppings: ["Mozzarella Cheese", "Pizza Sauce"],
-    prices: { Small: 9.99, Medium: 11.99, Large: 14.99 },
-    spicy: false
-  },
-  {
-    name: "Pepperoni",
-    category: "Specialty",
-    toppings: ["Pepperoni", "Mozzarella Cheese", "Pizza Sauce"],
-    prices: { Small: 10.99, Medium: 12.99, Large: 15.99 },
-    spicy: false
-  },
-  {
-    name: "Hawaiian",
-    category: "Specialty",
-    toppings: ["Ham", "Pineapple", "Mozzarella Cheese", "Pizza Sauce"],
-    prices: { Small: 10.99, Medium: 12.99, Large: 15.99 },
-    spicy: false
-  },
-  {
-    name: "Canadian",
-    category: "Specialty",
-    toppings: ["Pepperoni", "Bacon", "Mushrooms", "Mozzarella Cheese", "Pizza Sauce"],
-    prices: { Small: 11.99, Medium: 13.99, Large: 16.99 },
-    spicy: false
-  },
-
-  // ======================
-  // SIGNATURE PIZZAS
-  // ======================
-  {
-    name: "Meat Lovers",
-    category: "Signature",
-    toppings: ["Pepperoni", "Ham", "Beef", "Italian Sausage", "Mozzarella Cheese"],
-    prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
-    spicy: false
-  },
-  {
-    name: "BBQ Chicken",
-    category: "Signature",
-    toppings: ["Chicken", "Onions", "Green Peppers", "BBQ Sauce", "Mozzarella Cheese"],
-    prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
-    spicy: false
-  },
-  {
-    name: "Tandoori Chicken",
-    category: "Signature",
-    toppings: ["Tandoori Chicken", "Onions", "Green Peppers", "Mozzarella Cheese"],
-    prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
-    spicy: true
-  },
-
-  // ======================
-  // GOURMET PIZZAS
-  // ======================
-  {
-    name: "Butter Chicken",
-    category: "Gourmet",
-    toppings: ["Butter Chicken", "Onions", "Green Peppers", "Jalapenos", "Mozzarella Cheese"],
-    prices: { Small: 13.49, Medium: 15.49, Large: 18.49 },
-    spicy: true
-  },
-  {
-    name: "Shahi Paneer",
-    category: "Gourmet",
-    toppings: ["Tandoori Paneer", "Onions", "Spinach", "Mushrooms", "Mozzarella Cheese"],
-    prices: { Small: 13.49, Medium: 15.49, Large: 18.49 },
-    spicy: true
-  },
-  {
-    name: "Passion of India",
-    category: "Gourmet",
-    toppings: ["Paneer", "Spinach", "Mushrooms", "Green Peppers", "Mozzarella Cheese"],
-    prices: { Small: 13.99, Medium: 15.99, Large: 18.99 },
-    spicy: true
-  }
+  { name: "Shahi Paneer", spicy: true },
+  { name: "Butter Chicken", spicy: true },
+  { name: "Tandoori Chicken", spicy: true },
+  { name: "Veggie Supreme", spicy: false },
+  { name: "Pepperoni", spicy: false },
+  { name: "Cheese Lovers", spicy: false }
 ];
-
-
-/* =========================
-   SYSTEM PROMPT
-========================= */
-
-const SYSTEM_PROMPT = `
-You work at Pizza 64.
-Speak like a real pizza shop employee.
-Ask one question at a time.
-Only use items from MENU.
-Never invent food.
-Confirm order before finishing.
-`;
 
 /* =========================
    SESSION MEMORY
@@ -143,15 +53,15 @@ const sessions = new Map();
 function newSession(phone) {
   return {
     messages: [],
+    step: "ordering",
     order: {
       items: [],
       orderType: null,
       address: null,
-      phone
-    },
-    readyToExtract: false,
-    awaitingConfirmation: false,
-    awaitingAddress: false
+      name: null,
+      phone: phone || null,
+      cilantro: false
+    }
   };
 }
 
@@ -163,47 +73,56 @@ function getSession(id, phone) {
 }
 
 /* =========================
-   TICKET SYSTEM
+   TICKETS
 ========================= */
 
 let tickets = [];
-let ticketDate = new Date().toDateString();
-let ticketCounter = 1;
+let today = new Date().toDateString();
+let counter = 1;
 
-function generateTicketNumber() {
-  const today = new Date().toDateString();
-  if (today !== ticketDate) {
-    ticketDate = today;
-    ticketCounter = 1;
+function nextTicket() {
+  const now = new Date().toDateString();
+  if (now !== today) {
+    today = now;
+    counter = 1;
   }
-  return `${today.replace(/\s/g, "")}-${ticketCounter++}`;
+  return `${today.replace(/\s/g, "")}-${counter++}`;
 }
 
 function createTicket(order, source) {
   const ticket = {
-    ticketNo: generateTicketNumber(),
+    ticketNo: nextTicket(),
     time: new Date().toLocaleTimeString(),
     source,
     order
   };
-
   tickets.unshift(ticket);
-
   console.log("🎫 NEW TICKET:", ticket.ticketNo);
   console.log(buildKitchenTicket(order));
-
   return ticket;
 }
+
+/* =========================
+   PROMPT
+========================= */
+
+const SYSTEM_PROMPT = `
+You work at Pizza 64.
+Be friendly and short.
+Ask one question at a time.
+Only offer items from MENU.
+Never invent food.
+`;
 
 /* =========================
    CHAT REPLY
 ========================= */
 
-async function chatReply(session, message) {
+async function chatReply(session, text) {
   const client = await getOpenAI();
   if (!client) return "Sorry, system issue.";
 
-  session.messages.push({ role: "user", content: message });
+  session.messages.push({ role: "user", content: text });
 
   const res = await client.chat.completions.create({
     model: "gpt-4o-mini",
@@ -220,68 +139,104 @@ async function chatReply(session, message) {
 }
 
 /* =========================
-   INTENT
+   ORDER FLOW LOGIC
 ========================= */
 
-function detectIntent(session, text) {
+function handleSteps(session, text) {
   const t = text.toLowerCase();
-  if (/delivery/.test(t)) {
-    session.order.orderType = "delivery";
-    session.awaitingAddress = true;
-  }
-  if (/pickup/.test(t)) session.order.orderType = "pickup";
-  if (/that's all|done|nothing else/.test(t)) session.readyToExtract = true;
-}
 
-/* =========================
-   ORDER EXTRACTION
-========================= */
-
-async function extractOrder(session) {
-  const client = await getOpenAI();
-  if (!client) return null;
-
-  const res = await client.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0,
-    messages: [
-      {
-        role: "system",
-        content: `Return STRICT JSON:
-{ "items":[{"name":"","quantity":1,"size":"Medium","price":0}] }`
-      },
-      ...session.messages.slice(-12)
-    ]
-  });
-
-  try {
-    return JSON.parse(res.choices[0].message.content);
-  } catch {
+  if (session.step === "ordering") {
+    const found = MENU.find(p => t.includes(p.name.toLowerCase()));
+    if (found) {
+      session.order.items.push({ name: found.name, quantity: 1 });
+      session.step = "orderType";
+      return "Pickup or delivery?";
+    }
     return null;
   }
+
+  if (session.step === "orderType") {
+    if (t.includes("delivery")) {
+      session.order.orderType = "delivery";
+      session.step = "address";
+      return "Can I get the delivery address?";
+    }
+    if (t.includes("pickup")) {
+      session.order.orderType = "pickup";
+      session.step = "name";
+      return "May I have your name?";
+    }
+  }
+
+  if (session.step === "address") {
+    session.order.address = text;
+    session.step = "name";
+    return "May I have your name?";
+  }
+
+  if (session.step === "name") {
+    session.order.name = text;
+    session.step = "phone";
+    return "Can I get a contact phone number?";
+  }
+
+  if (session.step === "phone") {
+    session.order.phone = text;
+    session.step = "cilantro";
+    return "Would you like to add cilantro on your pizza?";
+  }
+
+  if (session.step === "cilantro") {
+    session.order.cilantro = t.includes("yes");
+    session.step = "confirm";
+    return "Perfect! Confirming your order now.";
+  }
+
+  return null;
 }
 
 /* =========================
    RECEIPTS
 ========================= */
 
-function buildReceipt(order) {
-  return order.items
-    .map(i => `${i.quantity} x ${i.size} ${i.name}`)
-    .join("\n");
-}
-
 function buildKitchenTicket(order) {
   return `
-🍕 PIZZA 64 KITCHEN
+🍕 PIZZA 64 - KITCHEN
 ------------------
-${order.items.map(i => `${i.quantity} x ${i.size} ${i.name}`).join("\n")}
+${order.items.map(i => `${i.quantity} x ${i.name}`).join("\n")}
+Cilantro: ${order.cilantro ? "YES" : "NO"}
 TYPE: ${order.orderType}
+${order.address ? "ADDRESS: " + order.address : ""}
 `;
 }
 
 /* =========================
-   TWILIO VOICE
+   CHAT API
+========================= */
+
+app.post("/chat", async (req, res) => {
+  const { sessionId, message } = req.body;
+  const session = getSession(sessionId);
+
+  const stepReply = handleSteps(session, message);
+  if (stepReply) return res.json({ reply: stepReply });
+
+  if (session.step === "confirm") {
+    const ticket = createTicket(session.order, "CHAT");
+    sessions.delete(sessionId);
+    return res.json({
+      reply: `✅ Order confirmed!
+Ticket #${ticket.ticketNo}
+Pickup in 20–25 minutes 🍕`
+    });
+  }
+
+  const reply = await chatReply(session, message);
+  res.json({ reply });
+});
+
+/* =========================
+   TWILIO CALLS
 ========================= */
 
 app.post("/twilio/voice", (req, res) => {
@@ -299,27 +254,18 @@ app.post("/twilio/step", async (req, res) => {
   const session = getSession(callSid, phone);
   const twiml = new twilio.twiml.VoiceResponse();
 
-  detectIntent(session, speech);
-
-  if (session.awaitingConfirmation) {
-    if (/yes|correct/.test(speech.toLowerCase())) {
-      const ticket = createTicket(session.order, "CALL");
-      twiml.say(`Order confirmed. Ticket number ${ticket.ticketNo}.`);
-      sessions.delete(callSid);
-      return res.type("text/xml").send(twiml.toString());
-    }
-    session.awaitingConfirmation = false;
+  const stepReply = handleSteps(session, speech);
+  if (stepReply) {
+    twiml.say(stepReply);
+    twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+    return res.type("text/xml").send(twiml.toString());
   }
 
-  if (session.readyToExtract) {
-    const extracted = await extractOrder(session);
-    if (extracted?.items?.length) {
-      session.order.items = extracted.items;
-      session.awaitingConfirmation = true;
-      twiml.say(`Confirming your order. Is that correct?`);
-      twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
-      return res.type("text/xml").send(twiml.toString());
-    }
+  if (session.step === "confirm") {
+    const ticket = createTicket(session.order, "CALL");
+    twiml.say(`Order confirmed. Ticket number ${ticket.ticketNo}. Ready in 25 minutes.`);
+    sessions.delete(callSid);
+    return res.type("text/xml").send(twiml.toString());
   }
 
   const reply = await chatReply(session, speech);
@@ -329,41 +275,7 @@ app.post("/twilio/step", async (req, res) => {
 });
 
 /* =========================
-   CHAT API
-========================= */
-
-app.post("/chat", async (req, res) => {
-  const { sessionId, message } = req.body;
-  const session = getSession(sessionId, "+1000000000");
-
-  detectIntent(session, message);
-
-  if (session.awaitingConfirmation) {
-    if (/yes|correct/.test(message.toLowerCase())) {
-      const ticket = createTicket(session.order, "CHAT");
-      sessions.delete(sessionId);
-      return res.json({
-        reply: `Order confirmed! Ticket #${ticket.ticketNo}`
-      });
-    }
-    session.awaitingConfirmation = false;
-  }
-
-  if (session.readyToExtract) {
-    const extracted = await extractOrder(session);
-    if (extracted?.items?.length) {
-      session.order.items = extracted.items;
-      session.awaitingConfirmation = true;
-      return res.json({ reply: "Please confirm your order." });
-    }
-  }
-
-  const reply = await chatReply(session, message);
-  res.json({ reply });
-});
-
-/* =========================
-   TICKETS API (HTML VIEW)
+   TICKETS API
 ========================= */
 
 app.get("/api/tickets", (req, res) => {
