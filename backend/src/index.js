@@ -58,21 +58,18 @@ function normalize(text = "") {
 function findPizza(text) {
   const t = normalize(text);
 
-  // Exact or partial match
   for (const p of MENU) {
     if (t.includes(normalize(p))) {
       return { name: p, sure: true };
     }
   }
 
-  // Fuzzy typo handling
   const aliases = {
-    "shai": "Shahi Paneer",
-    "paneer": "Shahi Paneer",
-    "paner": "Shahi Paneer",
-    "tandori": "Tandoori Chicken",
-    "tandoori": "Tandoori Chicken",
-    "veg": "Veggie Supreme"
+    shai: "Shahi Paneer",
+    paneer: "Shahi Paneer",
+    paner: "Shahi Paneer",
+    tandori: "Tandoori Chicken",
+    veg: "Veggie Supreme"
   };
 
   for (const key in aliases) {
@@ -84,13 +81,10 @@ function findPizza(text) {
   return null;
 }
 
-
-
 function isDone(text = "") {
   return /^(no|nah|nope)$|no more|thats all|that’s all|done|finish|nothing else/i
     .test(text.trim());
 }
-
 
 /* =========================
    CHAT LOGIC
@@ -105,126 +99,117 @@ function reply(session, msg) {
     return "Hi! Welcome to Pizza 64 🙂 Pickup or delivery?";
   }
 
-  // Order type
+  // Pickup / Delivery
   if (!session.orderType) {
     if (text.includes("pickup")) session.orderType = "Pickup";
     if (text.includes("delivery")) session.orderType = "Delivery";
     if (!session.orderType) return "Pickup or delivery?";
   }
 
-  // Pizza detection
-  if (!session.current.pizza) {
-    const found = findPizza(msg);
-    if (found) {
+  /* =========================
+     PIZZA FLOW (ONLY IF NOT DONE)
+  ========================= */
+
+  if (!session.doneWithPizzas) {
+
+    // Pizza
+    if (!session.current.pizza) {
+      const found = findPizza(msg);
+      if (!found) {
+        return `What pizza would you like? We have ${MENU.join(", ")}.`;
+      }
       if (!found.sure) {
         session.pendingPizza = found.name;
         return `Did you mean ${found.name}?`;
       }
       session.current.pizza = found.name;
-    } else {
-      return `What pizza would you like? We have ${MENU.join(", ")}.`;
     }
-  }
 
-  // Confirm fuzzy pizza
-  if (session.pendingPizza && !session.current.pizza) {
-    if (text.includes("yes")) {
-      session.current.pizza = session.pendingPizza;
-      session.pendingPizza = null;
-    } else {
-      session.pendingPizza = null;
-      return `Okay, please choose from ${MENU.join(", ")}.`;
+    // Confirm fuzzy pizza
+    if (session.pendingPizza && !session.current.pizza) {
+      if (text.includes("yes")) {
+        session.current.pizza = session.pendingPizza;
+        session.pendingPizza = null;
+      } else {
+        session.pendingPizza = null;
+        return `Okay, please choose from ${MENU.join(", ")}.`;
+      }
     }
-  }
 
-  // Size
-  if (!session.current.size) {
-    if (text.includes("small")) session.current.size = "Small";
-    if (text.includes("medium")) session.current.size = "Medium";
-    if (text.includes("large")) session.current.size = "Large";
+    // Size
     if (!session.current.size) {
-      return "What size would you like? Small, Medium, or Large?";
+      if (text.includes("small")) session.current.size = "Small";
+      if (text.includes("medium")) session.current.size = "Medium";
+      if (text.includes("large")) session.current.size = "Large";
+      if (!session.current.size)
+        return "What size would you like? Small, Medium, or Large?";
     }
-  }
 
-  // Spice
-  if (!session.current.spice) {
-    if (text.includes("mild")) session.current.spice = "Mild";
-    if (text.includes("medium")) session.current.spice = "Medium";
-    if (text.includes("hot")) session.current.spice = "Hot";
+    // Spice
     if (!session.current.spice) {
-      return "How spicy would you like it? Mild, Medium, or Hot?";
+      if (text.includes("mild")) session.current.spice = "Mild";
+      if (text.includes("medium")) session.current.spice = "Medium";
+      if (text.includes("hot")) session.current.spice = "Hot";
+      if (!session.current.spice)
+        return "How spicy would you like it? Mild, Medium, or Hot?";
+    }
+
+    // Cilantro
+    if (session.current.cilantro === undefined) {
+      session.current.cilantro = "ASK";
+      return "Would you like to add cilantro? Yes or No?";
+    }
+
+    if (session.current.cilantro === "ASK") {
+      session.current.cilantro = text.includes("yes") ? "Yes" : "No";
+    }
+
+    // Save pizza
+    if (
+      session.current.pizza &&
+      session.current.size &&
+      session.current.spice &&
+      session.current.cilantro !== undefined &&
+      !session.awaitingMorePizza
+    ) {
+      session.items.push({ ...session.current });
+      session.current = {};
+      session.awaitingMorePizza = true;
+      return "Would you like to add another pizza or is that all?";
+    }
+
+    // Handle more pizza
+    if (session.awaitingMorePizza) {
+      if (isDone(msg)) {
+        session.awaitingMorePizza = false;
+        session.doneWithPizzas = true;
+      } else {
+        session.awaitingMorePizza = false;
+        return `What pizza would you like? We have ${MENU.join(", ")}.`;
+      }
     }
   }
 
-  // Cilantro
-  if (session.current.cilantro === undefined) {
-    session.current.cilantro = "ASK";
-    return "Would you like to add cilantro? Yes or No?";
-  }
+  /* =========================
+     CUSTOMER DETAILS
+  ========================= */
 
-  if (session.current.cilantro === "ASK") {
-    session.current.cilantro = text.includes("yes") ? "Yes" : "No";
-  }
-
-// =========================
-// SAVE PIZZA (ONLY ONCE)
-// =========================
-if (
-  session.current.pizza &&
-  session.current.size &&
-  session.current.spice &&
-  session.current.cilantro !== undefined &&
-  !session.awaitingMorePizza
-) {
-  session.items.push({ ...session.current });
-
-  // reset current pizza
-  session.current = {};
-
-  // pause flow and ask about more pizzas
-  session.awaitingMorePizza = true;
-  return "Would you like to add another pizza or is that all?";
-}
-
-// =========================
-// HANDLE "ANOTHER PIZZA?" ANSWER
-// =========================
-if (session.awaitingMorePizza) {
-  if (isDone(msg)) {
-    // user said NO / THAT'S ALL
-    session.awaitingMorePizza = false;
-    // IMPORTANT: do NOT return → flow continues to name
-  } else {
-    // user wants another pizza
-    session.awaitingMorePizza = false;
-    session.current = {};
-    return "What pizza would you like? We have Cheese Lovers, Pepperoni, Veggie Supreme, Butter Chicken, Shahi Paneer, Tandoori Chicken.";
-  }
-}
-
-
-  
-
-  // Name
   if (!session.name) {
     return "May I have your name for the order?";
   }
 
-  // Phone
   if (!session.phone) {
-    if (/\b\d{10}\b/.test(text)) {
-      session.phone = text.match(/\b\d{10}\b/)[0];
-    } else {
-      return "Can I get a contact phone number?";
-    }
+    const match = msg.match(/\b\d{10}\b/);
+    if (!match) return "Can I get a contact phone number?";
+    session.phone = match[0];
   }
 
-  // Confirmation
   if (!session.confirming) {
     session.confirming = true;
     return `Please confirm your order:
-${session.items.map(i => `${i.size} ${i.pizza} (${i.spice}) Cilantro: ${i.cilantro}`).join("\n")}
+${session.items.map(
+      i => `${i.size} ${i.pizza} (${i.spice}) Cilantro: ${i.cilantro}`
+    ).join("\n")}
 ${session.orderType}
 Is that correct?`;
   }
@@ -266,13 +251,14 @@ app.post("/chat", (req, res) => {
       orderType: null,
       name: null,
       phone: null,
-      confirming: false
+      confirming: false,
+      awaitingMorePizza: false,
+      doneWithPizzas: false
     });
   }
 
   const session = sessions.get(sessionId);
-  const replyText = reply(session, message);
-  res.json({ reply: replyText });
+  res.json({ reply: reply(session, message) });
 });
 
 /* =========================
@@ -291,6 +277,301 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 running on port", PORT);
 });
+
+
+// import express from "express";
+// import cors from "cors";
+// import path from "path";
+// import { fileURLToPath } from "url";
+
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+
+// const app = express();
+// app.use(cors());
+// app.use(express.json());
+// app.use(express.static(path.join(__dirname, "../public")));
+
+// /* =========================
+//    MENU
+// ========================= */
+
+// const MENU = [
+//   "Cheese Lovers",
+//   "Pepperoni",
+//   "Veggie Supreme",
+//   "Butter Chicken",
+//   "Shahi Paneer",
+//   "Tandoori Chicken"
+// ];
+
+// /* =========================
+//    STORAGE
+// ========================= */
+
+// const sessions = new Map();
+// let tickets = [];
+
+// let day = new Date().toDateString();
+// let counter = 1;
+
+// function nextTicket() {
+//   const today = new Date().toDateString();
+//   if (today !== day) {
+//     day = today;
+//     counter = 1;
+//   }
+//   return `P64-${today.replace(/\s/g, "")}-${counter++}`;
+// }
+
+// /* =========================
+//    HELPERS
+// ========================= */
+
+// function normalize(text = "") {
+//   return text
+//     .toLowerCase()
+//     .replace(/[^a-z0-9\s]/g, "")
+//     .replace(/\s+/g, " ")
+//     .trim();
+// }
+
+// function findPizza(text) {
+//   const t = normalize(text);
+
+//   // Exact or partial match
+//   for (const p of MENU) {
+//     if (t.includes(normalize(p))) {
+//       return { name: p, sure: true };
+//     }
+//   }
+
+//   // Fuzzy typo handling
+//   const aliases = {
+//     "shai": "Shahi Paneer",
+//     "paneer": "Shahi Paneer",
+//     "paner": "Shahi Paneer",
+//     "tandori": "Tandoori Chicken",
+//     "tandoori": "Tandoori Chicken",
+//     "veg": "Veggie Supreme"
+//   };
+
+//   for (const key in aliases) {
+//     if (t.includes(key)) {
+//       return { name: aliases[key], sure: false };
+//     }
+//   }
+
+//   return null;
+// }
+
+
+
+// function isDone(text = "") {
+//   return /^(no|nah|nope)$|no more|thats all|that’s all|done|finish|nothing else/i
+//     .test(text.trim());
+// }
+
+
+// /* =========================
+//    CHAT LOGIC
+// ========================= */
+
+// function reply(session, msg) {
+//   const text = normalize(msg);
+
+//   // Greeting
+//   if (!session.started) {
+//     session.started = true;
+//     return "Hi! Welcome to Pizza 64 🙂 Pickup or delivery?";
+//   }
+
+//   // Order type
+//   if (!session.orderType) {
+//     if (text.includes("pickup")) session.orderType = "Pickup";
+//     if (text.includes("delivery")) session.orderType = "Delivery";
+//     if (!session.orderType) return "Pickup or delivery?";
+//   }
+
+//   // Pizza detection
+//   if (!session.current.pizza) {
+//     const found = findPizza(msg);
+//     if (found) {
+//       if (!found.sure) {
+//         session.pendingPizza = found.name;
+//         return `Did you mean ${found.name}?`;
+//       }
+//       session.current.pizza = found.name;
+//     } else {
+//       return `What pizza would you like? We have ${MENU.join(", ")}.`;
+//     }
+//   }
+
+//   // Confirm fuzzy pizza
+//   if (session.pendingPizza && !session.current.pizza) {
+//     if (text.includes("yes")) {
+//       session.current.pizza = session.pendingPizza;
+//       session.pendingPizza = null;
+//     } else {
+//       session.pendingPizza = null;
+//       return `Okay, please choose from ${MENU.join(", ")}.`;
+//     }
+//   }
+
+//   // Size
+//   if (!session.current.size) {
+//     if (text.includes("small")) session.current.size = "Small";
+//     if (text.includes("medium")) session.current.size = "Medium";
+//     if (text.includes("large")) session.current.size = "Large";
+//     if (!session.current.size) {
+//       return "What size would you like? Small, Medium, or Large?";
+//     }
+//   }
+
+//   // Spice
+//   if (!session.current.spice) {
+//     if (text.includes("mild")) session.current.spice = "Mild";
+//     if (text.includes("medium")) session.current.spice = "Medium";
+//     if (text.includes("hot")) session.current.spice = "Hot";
+//     if (!session.current.spice) {
+//       return "How spicy would you like it? Mild, Medium, or Hot?";
+//     }
+//   }
+
+//   // Cilantro
+//   if (session.current.cilantro === undefined) {
+//     session.current.cilantro = "ASK";
+//     return "Would you like to add cilantro? Yes or No?";
+//   }
+
+//   if (session.current.cilantro === "ASK") {
+//     session.current.cilantro = text.includes("yes") ? "Yes" : "No";
+//   }
+
+// // =========================
+// // SAVE PIZZA (ONLY ONCE)
+// // =========================
+// if (
+//   session.current.pizza &&
+//   session.current.size &&
+//   session.current.spice &&
+//   session.current.cilantro !== undefined &&
+//   !session.awaitingMorePizza
+// ) {
+//   session.items.push({ ...session.current });
+
+//   // reset current pizza
+//   session.current = {};
+
+//   // pause flow and ask about more pizzas
+//   session.awaitingMorePizza = true;
+//   return "Would you like to add another pizza or is that all?";
+// }
+
+// // =========================
+// // HANDLE "ANOTHER PIZZA?" ANSWER
+// // =========================
+// if (session.awaitingMorePizza) {
+//   if (isDone(msg)) {
+//     // user said NO / THAT'S ALL
+//     session.awaitingMorePizza = false;
+//     // IMPORTANT: do NOT return → flow continues to name
+//   } else {
+//     // user wants another pizza
+//     session.awaitingMorePizza = false;
+//     session.current = {};
+//     return "What pizza would you like? We have Cheese Lovers, Pepperoni, Veggie Supreme, Butter Chicken, Shahi Paneer, Tandoori Chicken.";
+//   }
+// }
+
+
+  
+
+//   // Name
+//   if (!session.name) {
+//     return "May I have your name for the order?";
+//   }
+
+//   // Phone
+//   if (!session.phone) {
+//     if (/\b\d{10}\b/.test(text)) {
+//       session.phone = text.match(/\b\d{10}\b/)[0];
+//     } else {
+//       return "Can I get a contact phone number?";
+//     }
+//   }
+
+//   // Confirmation
+//   if (!session.confirming) {
+//     session.confirming = true;
+//     return `Please confirm your order:
+// ${session.items.map(i => `${i.size} ${i.pizza} (${i.spice}) Cilantro: ${i.cilantro}`).join("\n")}
+// ${session.orderType}
+// Is that correct?`;
+//   }
+
+//   if (text.includes("yes")) {
+//     const ticket = {
+//       id: nextTicket(),
+//       time: new Date().toLocaleTimeString(),
+//       name: session.name,
+//       phone: session.phone,
+//       orderType: session.orderType,
+//       items: session.items
+//     };
+
+//     tickets.unshift(ticket);
+//     sessions.delete(session.id);
+
+//     return `✅ Order confirmed! Ticket #${ticket.id}
+// Your pizza will be ready in 20–25 minutes.
+// Thank you for ordering Pizza 64 🍕`;
+//   }
+
+//   return "No problem — what would you like to change?";
+// }
+
+// /* =========================
+//    CHAT API
+// ========================= */
+
+// app.post("/chat", (req, res) => {
+//   const { sessionId, message } = req.body;
+
+//   if (!sessions.has(sessionId)) {
+//     sessions.set(sessionId, {
+//       id: sessionId,
+//       started: false,
+//       items: [],
+//       current: {},
+//       orderType: null,
+//       name: null,
+//       phone: null,
+//       confirming: false
+//     });
+//   }
+
+//   const session = sessions.get(sessionId);
+//   const replyText = reply(session, message);
+//   res.json({ reply: replyText });
+// });
+
+// /* =========================
+//    TICKETS API
+// ========================= */
+
+// app.get("/api/tickets", (req, res) => {
+//   res.json(tickets);
+// });
+
+// /* =========================
+//    SERVER
+// ========================= */
+
+// const PORT = process.env.PORT || 10000;
+// app.listen(PORT, () => {
+//   console.log("🍕 Pizza 64 running on port", PORT);
+// });
 
 
 // import "dotenv/config";
