@@ -1,14 +1,16 @@
-
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import twilio from "twilio";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/* =========================
+   APP SETUP
+========================= */
 
 const app = express();
 app.use(cors());
@@ -30,160 +32,194 @@ const MENU = [
 ];
 
 /* =========================
-   TICKETS (FILE BASED)
-========================= */
-
-const TICKET_FILE = path.join(__dirname, "tickets.json");
-
-function loadTickets() {
-  if (!fs.existsSync(TICKET_FILE)) return [];
-  return JSON.parse(fs.readFileSync(TICKET_FILE, "utf8"));
-}
-
-function saveTickets(tickets) {
-  fs.writeFileSync(TICKET_FILE, JSON.stringify(tickets, null, 2));
-}
-
-function createTicket(order) {
-  const tickets = loadTickets();
-  const today = new Date().toISOString().slice(0, 10);
-  const ticketNo = `P64-${today}-${tickets.length + 1}`;
-
-  const ticket = {
-    ticketNo,
-    time: new Date().toLocaleTimeString(),
-    order
-  };
-
-  tickets.unshift(ticket);
-  saveTickets(tickets);
-  return ticket;
-}
-
-/* =========================
-   SESSION MEMORY
+   SESSION STORE
 ========================= */
 
 const sessions = new Map();
 
-function newSession() {
-  return {
-    order: {
-      pizza: null,
-      size: null,
-      spice: null,
-      cilantro: null,
-      orderType: null,
-      name: null,
-      phone: null
-    },
-    confirmed: false
-  };
-}
+/* =========================
+   TICKETS
+========================= */
 
-function getSession(id) {
-  if (!sessions.has(id)) sessions.set(id, newSession());
-  return sessions.get(id);
+let tickets = [];
+let today = new Date().toDateString();
+let counter = 1;
+
+function nextTicket() {
+  const now = new Date().toDateString();
+  if (now !== today) {
+    today = now;
+    counter = 1;
+  }
+  return `P64-${today.replace(/\s/g, "")}-${counter++}`;
 }
 
 /* =========================
-   HELPERS
+   FUZZY MATCH
 ========================= */
 
-function normalize(text) {
-  return text.toLowerCase().replace(/[^a-z\s]/g, "");
+function normalize(t) {
+  return t.toLowerCase().replace(/[^a-z\s]/g, "");
 }
 
-function matchPizza(text) {
-  const t = normalize(text);
-  return MENU.find(p =>
-    t.includes(normalize(p).split(" ")[0])
-  );
+function fuzzyPizzaMatch(text) {
+  const clean = normalize(text);
+  for (const pizza of MENU) {
+    const key = normalize(pizza);
+    if (clean.includes(key)) return { name: pizza, sure: true };
+    if (key.split(" ").some(w => clean.includes(w)))
+      return { name: pizza, sure: false };
+  }
+  return null;
+}
+
+/* =========================
+   EXTRACT INFO
+========================= */
+
+function extractInfo(text, session) {
+  const t = text.toLowerCase();
+
+  // quantity
+  if (!session.order.quantity) {
+    const q = t.match(/\b(\d+)\b/);
+    if (q) session.order.quantity = parseInt(q[1]);
+  }
+
+  // size
+  if (!session.order.size) {
+    if (t.includes("small")) session.order.size = "Small";
+    if (t.includes("medium")) session.order.size = "Medium";
+    if (t.includes("large")) session.order.size = "Large";
+  }
+
+  // spice
+  if (!session.order.spice) {
+    if (t.includes("mild")) session.order.spice = "Mild";
+    if (t.includes("medium")) session.order.spice = "Medium";
+    if (t.includes("hot")) session.order.spice = "Hot";
+  }
+
+  // pickup / delivery
+  if (!session.order.type) {
+    if (t.includes("pickup")) session.order.type = "Pickup";
+    if (t.includes("delivery")) session.order.type = "Delivery";
+  }
+
+  // phone
+  if (!session.order.phone) {
+    const p = t.match(/\b\d{10}\b/);
+    if (p) session.order.phone = p[0];
+  }
+
+  // pizza
+  if (!session.order.pizza) {
+    const match = fuzzyPizzaMatch(text);
+    if (match) {
+      if (match.sure) {
+        session.order.pizza = match.name;
+      } else {
+        session.pizzaCandidate = match.name;
+      }
+    }
+  }
 }
 
 /* =========================
    CHAT LOGIC
 ========================= */
 
+function chatLogic(session, msg) {
+  extractInfo(msg, session);
+  const text = normalize(msg);
+
+  // confirm typo
+  if (!session.order.pizza && session.pizzaCandidate) {
+    if (text.includes("yes")) {
+      session.order.pizza = session.pizzaCandidate;
+      session.pizzaCandidate = null;
+      return "Got it 👍 What size would you like? Small, Medium, or Large?";
+    }
+    return `Did you mean ${session.pizzaCandidate}?`;
+  }
+
+  if (!session.order.type) {
+    return "Pickup or delivery?";
+  }
+
+  if (!session.order.pizza) {
+    return `What pizza would you like? We have ${MENU.join(", ")}.`;
+  }
+
+  if (!session.order.size) {
+    return "What size would you like? Small, Medium, or Large?";
+  }
+
+  if (!session.order.spice) {
+    return "How spicy would you like it? Mild, Medium, or Hot?";
+  }
+
+  if (!session.order.cilantro) {
+    session.order.cilantro = "ASK";
+    return "Would you like to add cilantro? Yes or No?";
+  }
+
+  if (session.order.cilantro === "ASK") {
+    session.order.cilantro = text.includes("yes") ? "Yes" : "No";
+  }
+
+  if (!session.order.name) {
+    return "May I have your name for the order?";
+  }
+
+  if (!session.order.phone) {
+    return "Can I get a contact phone number?";
+  }
+
+  if (!session.awaitingConfirm) {
+    session.awaitingConfirm = true;
+    return `Please confirm your order:
+${session.order.quantity || 1} ${session.order.size} ${session.order.pizza}
+Spice: ${session.order.spice}
+Cilantro: ${session.order.cilantro}
+${session.order.type}
+Is that correct?`;
+  }
+
+  if (text.includes("yes")) {
+    const ticket = {
+      id: nextTicket(),
+      time: new Date().toLocaleTimeString(),
+      ...session.order
+    };
+    tickets.unshift(ticket);
+    sessions.delete(session.id);
+    return `✅ Order confirmed! Ticket #${ticket.id}
+Your pizza will be ready in 20–25 minutes.
+Thank you for ordering Pizza 64 🍕`;
+  }
+
+  return "No worries — what would you like to change?";
+}
+
+/* =========================
+   CHAT API
+========================= */
+
 app.post("/chat", (req, res) => {
   const { sessionId, message } = req.body;
-  const session = getSession(sessionId);
-  const msg = normalize(message);
 
-  // 1️⃣ pickup / delivery
-  if (!session.order.orderType) {
-    if (msg.includes("pickup")) session.order.orderType = "Pickup";
-    if (msg.includes("delivery")) session.order.orderType = "Delivery";
-    if (!session.order.orderType)
-      return res.json({ reply: "Pickup or delivery?" });
-  }
-
-  // 2️⃣ pizza
-  if (!session.order.pizza) {
-    const pizza = matchPizza(msg);
-    if (pizza) {
-      session.order.pizza = pizza;
-    } else {
-      return res.json({
-        reply: `What pizza would you like? We have ${MENU.join(", ")}.`
-      });
-    }
-  }
-
-  // 3️⃣ size
-  if (!session.order.size) {
-    if (msg.includes("small")) session.order.size = "Small";
-    if (msg.includes("medium")) session.order.size = "Medium";
-    if (msg.includes("large")) session.order.size = "Large";
-    if (!session.order.size)
-      return res.json({ reply: "What size would you like? Small, Medium, or Large?" });
-  }
-
-  // 4️⃣ spice
-  if (!session.order.spice) {
-    if (msg.includes("mild")) session.order.spice = "Mild";
-    if (msg.includes("medium")) session.order.spice = "Medium";
-    if (msg.includes("hot")) session.order.spice = "Hot";
-    if (!session.order.spice)
-      return res.json({ reply: "How spicy would you like it? Mild, Medium, or Hot?" });
-  }
-
-  // 5️⃣ cilantro
-  if (session.order.cilantro === null) {
-    if (msg.includes("no")) session.order.cilantro = "No";
-    if (msg.includes("yes")) session.order.cilantro = "Yes";
-    if (session.order.cilantro === null)
-      return res.json({ reply: "Would you like to add cilantro? Yes or No?" });
-  }
-
-  // 6️⃣ name
-  if (!session.order.name) {
-    if (msg.length > 2) {
-      session.order.name = message.trim();
-    } else {
-      return res.json({ reply: "May I have your name for the order?" });
-    }
-  }
-
-  // 7️⃣ phone
-  if (!session.order.phone) {
-    if (/\d{7,}/.test(msg)) {
-      session.order.phone = message.trim();
-    } else {
-      return res.json({ reply: "Can I get a contact phone number?" });
-    }
-  }
-
-  // 8️⃣ confirmation
-  if (!session.confirmed) {
-    session.confirmed = true;
-    const ticket = createTicket(session.order);
-    sessions.delete(sessionId);
-
-    return res.json({
-      reply: `✅ Order confirmed! Ticket #${ticket.ticketNo}. Your pizza will be ready in 20–25 minutes. Thank you for ordering Pizza 64 🍕`
+  if (!sessions.has(sessionId)) {
+    sessions.set(sessionId, {
+      id: sessionId,
+      order: {},
+      awaitingConfirm: false
     });
   }
+
+  const session = sessions.get(sessionId);
+  const reply = chatLogic(session, message);
+  res.json({ reply });
 });
 
 /* =========================
@@ -191,7 +227,38 @@ app.post("/chat", (req, res) => {
 ========================= */
 
 app.get("/api/tickets", (req, res) => {
-  res.json(loadTickets());
+  res.json(tickets);
+});
+
+/* =========================
+   TWILIO VOICE
+========================= */
+
+app.post("/twilio/voice", (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.say("Hi! Welcome to Pizza 64.");
+  twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/twilio/step", (req, res) => {
+  const sid = req.body.CallSid;
+  const speech = req.body.SpeechResult || "";
+
+  if (!sessions.has(sid)) {
+    sessions.set(sid, { id: sid, order: {}, awaitingConfirm: false });
+  }
+
+  const session = sessions.get(sid);
+  const reply = chatLogic(session, speech);
+
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.say(reply);
+  if (!reply.includes("confirmed")) {
+    twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+  }
+
+  res.type("text/xml").send(twiml.toString());
 });
 
 /* =========================
@@ -202,6 +269,214 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 running on port", PORT);
 });
+
+
+
+//version 
+
+// import "dotenv/config";
+// import express from "express";
+// import cors from "cors";
+// import twilio from "twilio";
+// import path from "path";
+// import fs from "fs";
+// import { fileURLToPath } from "url";
+
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+
+// const app = express();
+// app.use(cors());
+// app.use(express.urlencoded({ extended: false }));
+// app.use(express.json());
+// app.use(express.static(path.join(__dirname, "../public")));
+
+// /* =========================
+//    MENU
+// ========================= */
+
+// const MENU = [
+//   "Cheese Lovers",
+//   "Pepperoni",
+//   "Veggie Supreme",
+//   "Butter Chicken",
+//   "Shahi Paneer",
+//   "Tandoori Chicken"
+// ];
+
+// /* =========================
+//    TICKETS (FILE BASED)
+// ========================= */
+
+// const TICKET_FILE = path.join(__dirname, "tickets.json");
+
+// function loadTickets() {
+//   if (!fs.existsSync(TICKET_FILE)) return [];
+//   return JSON.parse(fs.readFileSync(TICKET_FILE, "utf8"));
+// }
+
+// function saveTickets(tickets) {
+//   fs.writeFileSync(TICKET_FILE, JSON.stringify(tickets, null, 2));
+// }
+
+// function createTicket(order) {
+//   const tickets = loadTickets();
+//   const today = new Date().toISOString().slice(0, 10);
+//   const ticketNo = `P64-${today}-${tickets.length + 1}`;
+
+//   const ticket = {
+//     ticketNo,
+//     time: new Date().toLocaleTimeString(),
+//     order
+//   };
+
+//   tickets.unshift(ticket);
+//   saveTickets(tickets);
+//   return ticket;
+// }
+
+// /* =========================
+//    SESSION MEMORY
+// ========================= */
+
+// const sessions = new Map();
+
+// function newSession() {
+//   return {
+//     order: {
+//       pizza: null,
+//       size: null,
+//       spice: null,
+//       cilantro: null,
+//       orderType: null,
+//       name: null,
+//       phone: null
+//     },
+//     confirmed: false
+//   };
+// }
+
+// function getSession(id) {
+//   if (!sessions.has(id)) sessions.set(id, newSession());
+//   return sessions.get(id);
+// }
+
+// /* =========================
+//    HELPERS
+// ========================= */
+
+// function normalize(text) {
+//   return text.toLowerCase().replace(/[^a-z\s]/g, "");
+// }
+
+// function matchPizza(text) {
+//   const t = normalize(text);
+//   return MENU.find(p =>
+//     t.includes(normalize(p).split(" ")[0])
+//   );
+// }
+
+// /* =========================
+//    CHAT LOGIC
+// ========================= */
+
+// app.post("/chat", (req, res) => {
+//   const { sessionId, message } = req.body;
+//   const session = getSession(sessionId);
+//   const msg = normalize(message);
+
+//   // 1️⃣ pickup / delivery
+//   if (!session.order.orderType) {
+//     if (msg.includes("pickup")) session.order.orderType = "Pickup";
+//     if (msg.includes("delivery")) session.order.orderType = "Delivery";
+//     if (!session.order.orderType)
+//       return res.json({ reply: "Pickup or delivery?" });
+//   }
+
+//   // 2️⃣ pizza
+//   if (!session.order.pizza) {
+//     const pizza = matchPizza(msg);
+//     if (pizza) {
+//       session.order.pizza = pizza;
+//     } else {
+//       return res.json({
+//         reply: `What pizza would you like? We have ${MENU.join(", ")}.`
+//       });
+//     }
+//   }
+
+//   // 3️⃣ size
+//   if (!session.order.size) {
+//     if (msg.includes("small")) session.order.size = "Small";
+//     if (msg.includes("medium")) session.order.size = "Medium";
+//     if (msg.includes("large")) session.order.size = "Large";
+//     if (!session.order.size)
+//       return res.json({ reply: "What size would you like? Small, Medium, or Large?" });
+//   }
+
+//   // 4️⃣ spice
+//   if (!session.order.spice) {
+//     if (msg.includes("mild")) session.order.spice = "Mild";
+//     if (msg.includes("medium")) session.order.spice = "Medium";
+//     if (msg.includes("hot")) session.order.spice = "Hot";
+//     if (!session.order.spice)
+//       return res.json({ reply: "How spicy would you like it? Mild, Medium, or Hot?" });
+//   }
+
+//   // 5️⃣ cilantro
+//   if (session.order.cilantro === null) {
+//     if (msg.includes("no")) session.order.cilantro = "No";
+//     if (msg.includes("yes")) session.order.cilantro = "Yes";
+//     if (session.order.cilantro === null)
+//       return res.json({ reply: "Would you like to add cilantro? Yes or No?" });
+//   }
+
+//   // 6️⃣ name
+//   if (!session.order.name) {
+//     if (msg.length > 2) {
+//       session.order.name = message.trim();
+//     } else {
+//       return res.json({ reply: "May I have your name for the order?" });
+//     }
+//   }
+
+//   // 7️⃣ phone
+//   if (!session.order.phone) {
+//     if (/\d{7,}/.test(msg)) {
+//       session.order.phone = message.trim();
+//     } else {
+//       return res.json({ reply: "Can I get a contact phone number?" });
+//     }
+//   }
+
+//   // 8️⃣ confirmation
+//   if (!session.confirmed) {
+//     session.confirmed = true;
+//     const ticket = createTicket(session.order);
+//     sessions.delete(sessionId);
+
+//     return res.json({
+//       reply: `✅ Order confirmed! Ticket #${ticket.ticketNo}. Your pizza will be ready in 20–25 minutes. Thank you for ordering Pizza 64 🍕`
+//     });
+//   }
+// });
+
+// /* =========================
+//    TICKETS API
+// ========================= */
+
+// app.get("/api/tickets", (req, res) => {
+//   res.json(loadTickets());
+// });
+
+// /* =========================
+//    SERVER
+// ========================= */
+
+// const PORT = process.env.PORT || 10000;
+// app.listen(PORT, () => {
+//   console.log("🍕 Pizza 64 running on port", PORT);
+// });
 
 
 // import "dotenv/config";
@@ -431,3 +706,385 @@ app.listen(PORT, () => {
 // app.listen(PORT, () => {
 //   console.log("🍕 Pizza 64 running on port", PORT);
 // });
+//version
+// import "dotenv/config";
+// import express from "express";
+// import cors from "cors";
+// import twilio from "twilio";
+// import path from "path";
+// import { fileURLToPath } from "url";
+
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+
+// /* =========================
+//    APP SETUP
+// ========================= */
+
+// const app = express();
+// app.use(cors());
+// app.use(express.urlencoded({ extended: false }));
+// app.use(express.json());
+// app.use(express.static(path.join(__dirname, "../public")));
+
+// /* =========================
+//    OPENAI
+// ========================= */
+
+// let openai = null;
+
+// async function getOpenAI() {
+//   if (openai) return openai;
+//   if (!process.env.OPENAI_API_KEY) return null;
+//   const { default: OpenAI } = await import("openai");
+//   openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+//   return openai;
+// }
+
+// /* =========================
+//    MENU (Pizza 64)
+// ========================= */
+
+// const MENU = [
+//   // ======================
+//   // SPECIALTY PIZZAS
+//   // ======================
+//   {
+//     name: "Cheese Lovers",
+//     category: "Specialty",
+//     toppings: ["Mozzarella Cheese", "Pizza Sauce"],
+//     prices: { Small: 9.99, Medium: 11.99, Large: 14.99 },
+//     spicy: false
+//   },
+//   {
+//     name: "Pepperoni",
+//     category: "Specialty",
+//     toppings: ["Pepperoni", "Mozzarella Cheese", "Pizza Sauce"],
+//     prices: { Small: 10.99, Medium: 12.99, Large: 15.99 },
+//     spicy: false
+//   },
+//   {
+//     name: "Hawaiian",
+//     category: "Specialty",
+//     toppings: ["Ham", "Pineapple", "Mozzarella Cheese", "Pizza Sauce"],
+//     prices: { Small: 10.99, Medium: 12.99, Large: 15.99 },
+//     spicy: false
+//   },
+//   {
+//     name: "Canadian",
+//     category: "Specialty",
+//     toppings: ["Pepperoni", "Bacon", "Mushrooms", "Mozzarella Cheese", "Pizza Sauce"],
+//     prices: { Small: 11.99, Medium: 13.99, Large: 16.99 },
+//     spicy: false
+//   },
+
+//   // ======================
+//   // SIGNATURE PIZZAS
+//   // ======================
+//   {
+//     name: "Meat Lovers",
+//     category: "Signature",
+//     toppings: ["Pepperoni", "Ham", "Beef", "Italian Sausage", "Mozzarella Cheese"],
+//     prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
+//     spicy: false
+//   },
+//   {
+//     name: "BBQ Chicken",
+//     category: "Signature",
+//     toppings: ["Chicken", "Onions", "Green Peppers", "BBQ Sauce", "Mozzarella Cheese"],
+//     prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
+//     spicy: false
+//   },
+//   {
+//     name: "Tandoori Chicken",
+//     category: "Signature",
+//     toppings: ["Tandoori Chicken", "Onions", "Green Peppers", "Mozzarella Cheese"],
+//     prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
+//     spicy: true
+//   },
+
+//   // ======================
+//   // GOURMET PIZZAS
+//   // ======================
+//   {
+//     name: "Butter Chicken",
+//     category: "Gourmet",
+//     toppings: ["Butter Chicken", "Onions", "Green Peppers", "Jalapenos", "Mozzarella Cheese"],
+//     prices: { Small: 13.49, Medium: 15.49, Large: 18.49 },
+//     spicy: true
+//   },
+//   {
+//     name: "Shahi Paneer",
+//     category: "Gourmet",
+//     toppings: ["Tandoori Paneer", "Onions", "Spinach", "Mushrooms", "Mozzarella Cheese"],
+//     prices: { Small: 13.49, Medium: 15.49, Large: 18.49 },
+//     spicy: true
+//   },
+//   {
+//     name: "Passion of India",
+//     category: "Gourmet",
+//     toppings: ["Paneer", "Spinach", "Mushrooms", "Green Peppers", "Mozzarella Cheese"],
+//     prices: { Small: 13.99, Medium: 15.99, Large: 18.99 },
+//     spicy: true
+//   }
+// ];
+
+
+// /* =========================
+//    SYSTEM PROMPT
+// ========================= */
+
+// const SYSTEM_PROMPT = `
+// You work at Pizza 64.
+// Speak like a real pizza shop employee.
+// Ask one question at a time.
+// Only use items from MENU.
+// Never invent food.
+// Confirm order before finishing.
+// `;
+
+// /* =========================
+//    SESSION MEMORY
+// ========================= */
+
+// const sessions = new Map();
+
+// function newSession(phone) {
+//   return {
+//     messages: [],
+//     order: {
+//       items: [],
+//       orderType: null,
+//       address: null,
+//       phone
+//     },
+//     readyToExtract: false,
+//     awaitingConfirmation: false,
+//     awaitingAddress: false
+//   };
+// }
+
+// function getSession(id, phone) {
+//   if (!sessions.has(id)) {
+//     sessions.set(id, newSession(phone));
+//   }
+//   return sessions.get(id);
+// }
+
+// /* =========================
+//    TICKET SYSTEM
+// ========================= */
+
+// let tickets = [];
+// let ticketDate = new Date().toDateString();
+// let ticketCounter = 1;
+
+// function generateTicketNumber() {
+//   const today = new Date().toDateString();
+//   if (today !== ticketDate) {
+//     ticketDate = today;
+//     ticketCounter = 1;
+//   }
+//   return `${today.replace(/\s/g, "")}-${ticketCounter++}`;
+// }
+
+// function createTicket(order, source) {
+//   const ticket = {
+//     ticketNo: generateTicketNumber(),
+//     time: new Date().toLocaleTimeString(),
+//     source,
+//     order
+//   };
+
+//   tickets.unshift(ticket);
+
+//   console.log("🎫 NEW TICKET:", ticket.ticketNo);
+//   console.log(buildKitchenTicket(order));
+
+//   return ticket;
+// }
+
+// /* =========================
+//    CHAT REPLY
+// ========================= */
+
+// async function chatReply(session, message) {
+//   const client = await getOpenAI();
+//   if (!client) return "Sorry, system issue.";
+
+//   session.messages.push({ role: "user", content: message });
+
+//   const res = await client.chat.completions.create({
+//     model: "gpt-4o-mini",
+//     messages: [
+//       { role: "system", content: SYSTEM_PROMPT },
+//       { role: "system", content: `MENU: ${JSON.stringify(MENU)}` },
+//       ...session.messages.slice(-10)
+//     ]
+//   });
+
+//   const reply = res.choices[0].message.content.trim();
+//   session.messages.push({ role: "assistant", content: reply });
+//   return reply;
+// }
+
+// /* =========================
+//    INTENT
+// ========================= */
+
+// function detectIntent(session, text) {
+//   const t = text.toLowerCase();
+//   if (/delivery/.test(t)) {
+//     session.order.orderType = "delivery";
+//     session.awaitingAddress = true;
+//   }
+//   if (/pickup/.test(t)) session.order.orderType = "pickup";
+//   if (/that's all|done|nothing else/.test(t)) session.readyToExtract = true;
+// }
+
+// /* =========================
+//    ORDER EXTRACTION
+// ========================= */
+
+// async function extractOrder(session) {
+//   const client = await getOpenAI();
+//   if (!client) return null;
+
+//   const res = await client.chat.completions.create({
+//     model: "gpt-4o-mini",
+//     temperature: 0,
+//     messages: [
+//       {
+//         role: "system",
+//         content: `Return STRICT JSON:
+// { "items":[{"name":"","quantity":1,"size":"Medium","price":0}] }`
+//       },
+//       ...session.messages.slice(-12)
+//     ]
+//   });
+
+//   try {
+//     return JSON.parse(res.choices[0].message.content);
+//   } catch {
+//     return null;
+//   }
+// }
+
+// /* =========================
+//    RECEIPTS
+// ========================= */
+
+// function buildReceipt(order) {
+//   return order.items
+//     .map(i => `${i.quantity} x ${i.size} ${i.name}`)
+//     .join("\n");
+// }
+
+// function buildKitchenTicket(order) {
+//   return `
+// 🍕 PIZZA 64 KITCHEN
+// ------------------
+// ${order.items.map(i => `${i.quantity} x ${i.size} ${i.name}`).join("\n")}
+// TYPE: ${order.orderType}
+// `;
+// }
+
+// /* =========================
+//    TWILIO VOICE
+// ========================= */
+
+// app.post("/twilio/voice", (req, res) => {
+//   const twiml = new twilio.twiml.VoiceResponse();
+//   twiml.say("Welcome to Pizza 64. What can I get for you?");
+//   twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+//   res.type("text/xml").send(twiml.toString());
+// });
+
+// app.post("/twilio/step", async (req, res) => {
+//   const callSid = req.body.CallSid;
+//   const speech = (req.body.SpeechResult || "").trim();
+//   const phone = req.body.From;
+
+//   const session = getSession(callSid, phone);
+//   const twiml = new twilio.twiml.VoiceResponse();
+
+//   detectIntent(session, speech);
+
+//   if (session.awaitingConfirmation) {
+//     if (/yes|correct/.test(speech.toLowerCase())) {
+//       const ticket = createTicket(session.order, "CALL");
+//       twiml.say(`Order confirmed. Ticket number ${ticket.ticketNo}.`);
+//       sessions.delete(callSid);
+//       return res.type("text/xml").send(twiml.toString());
+//     }
+//     session.awaitingConfirmation = false;
+//   }
+
+//   if (session.readyToExtract) {
+//     const extracted = await extractOrder(session);
+//     if (extracted?.items?.length) {
+//       session.order.items = extracted.items;
+//       session.awaitingConfirmation = true;
+//       twiml.say(`Confirming your order. Is that correct?`);
+//       twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+//       return res.type("text/xml").send(twiml.toString());
+//     }
+//   }
+
+//   const reply = await chatReply(session, speech);
+//   twiml.say(reply);
+//   twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+//   res.type("text/xml").send(twiml.toString());
+// });
+
+// /* =========================
+//    CHAT API
+// ========================= */
+
+// app.post("/chat", async (req, res) => {
+//   const { sessionId, message } = req.body;
+//   const session = getSession(sessionId, "+1000000000");
+
+//   detectIntent(session, message);
+
+//   if (session.awaitingConfirmation) {
+//     if (/yes|correct/.test(message.toLowerCase())) {
+//       const ticket = createTicket(session.order, "CHAT");
+//       sessions.delete(sessionId);
+//       return res.json({
+//         reply: `Order confirmed! Ticket #${ticket.ticketNo}`
+//       });
+//     }
+//     session.awaitingConfirmation = false;
+//   }
+
+//   if (session.readyToExtract) {
+//     const extracted = await extractOrder(session);
+//     if (extracted?.items?.length) {
+//       session.order.items = extracted.items;
+//       session.awaitingConfirmation = true;
+//       return res.json({ reply: "Please confirm your order." });
+//     }
+//   }
+
+//   const reply = await chatReply(session, message);
+//   res.json({ reply });
+// });
+
+// /* =========================
+//    TICKETS API (HTML VIEW)
+// ========================= */
+
+// app.get("/api/tickets", (req, res) => {
+//   res.json(tickets);
+// });
+
+// /* =========================
+//    SERVER
+// ========================= */
+
+// const PORT = process.env.PORT || 10000;
+// app.listen(PORT, () => {
+//   console.log("🍕 Pizza 64 running on port", PORT);
+// });
+
