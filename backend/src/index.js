@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import twilio from "twilio";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -9,11 +10,12 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
 /* =========================
-   MENU (Pizza 64)
+   MENU
 ========================= */
 
 const MENU = [
@@ -26,21 +28,20 @@ const MENU = [
 ];
 
 /* =========================
-   SESSION MEMORY
+   SESSIONS
 ========================= */
 
 const sessions = new Map();
 
-function newSession(phone = null) {
+function newSession(phone) {
   return {
-    step: "pizza",
+    step: "orderType",
     order: {
       pizza: null,
       size: null,
       spice: null,
       cilantro: null,
       orderType: null,
-      address: null,
       name: null,
       phone
     }
@@ -55,17 +56,44 @@ function getSession(id, phone) {
 }
 
 /* =========================
-   TICKET SYSTEM
+   FUZZY PIZZA MATCH
+========================= */
+
+function normalize(t) {
+  return t.toLowerCase().replace(/[^a-z]/g, "");
+}
+
+function findPizza(input) {
+  const text = normalize(input);
+  let best = null;
+  let score = 0;
+
+  for (const p of MENU) {
+    const name = normalize(p);
+    let s = 0;
+    for (const w of name.split("")) {
+      if (text.includes(w)) s++;
+    }
+    if (s > score) {
+      score = s;
+      best = p;
+    }
+  }
+  return score >= 4 ? best : null;
+}
+
+/* =========================
+   TICKETS
 ========================= */
 
 let tickets = [];
-let day = new Date().toDateString();
+let ticketDay = new Date().toDateString();
 let counter = 1;
 
 function nextTicket() {
   const today = new Date().toDateString();
-  if (today !== day) {
-    day = today;
+  if (today !== ticketDay) {
+    ticketDay = today;
     counter = 1;
   }
   return `${today.replace(/\s/g, "")}-${counter++}`;
@@ -78,100 +106,72 @@ function createTicket(order, source) {
     source,
     order
   };
-
   tickets.unshift(ticket);
-
-  console.log("🎫 CONFIRMED TICKET:", ticket.ticketNo);
-  console.log(ticket);
-
+  console.log("🎫 NEW TICKET", ticket.ticketNo);
   return ticket;
 }
 
 /* =========================
-   ORDER FLOW (CORE LOGIC)
+   CONVERSATION ENGINE
 ========================= */
 
-function handleOrderFlow(session, message) {
-  const t = message.toLowerCase();
+function handleConversation(session, text) {
+  const t = text.toLowerCase();
 
   switch (session.step) {
+    case "orderType":
+      if (/pickup/.test(t)) session.order.orderType = "pickup";
+      else if (/delivery/.test(t)) session.order.orderType = "delivery";
+      else return "Will this be pickup or delivery?";
+      session.step = "pizza";
+      return `We have ${MENU.join(", ")}. Which pizza would you like?`;
 
-    case "pizza": {
-      const pizza = MENU.find(p => t.includes(p.toLowerCase()));
-      if (!pizza) {
-        return `We have ${MENU.join(", ")}. Which pizza would you like?`;
-      }
+    case "pizza":
+      const pizza = findPizza(text);
+      if (!pizza) return `Sorry, we have ${MENU.join(", ")}. Which one would you like?`;
       session.order.pizza = pizza;
       session.step = "size";
       return "What size would you like? Small, Medium, or Large?";
-    }
 
-    case "size": {
-      if (!/small|medium|large/.test(t)) {
-        return "Please choose a size: Small, Medium, or Large.";
-      }
+    case "size":
+      if (!/small|medium|large/.test(t)) return "Please choose Small, Medium, or Large.";
       session.order.size = t.match(/small|medium|large/)[0];
       session.step = "spice";
       return "How spicy would you like it? Mild, Medium, or Hot?";
-    }
 
-    case "spice": {
-      if (!/mild|medium|hot/.test(t)) {
-        return "Please choose spice level: Mild, Medium, or Hot.";
-      }
+    case "spice":
+      if (!/mild|medium|hot/.test(t)) return "Please choose Mild, Medium, or Hot.";
       session.order.spice = t.match(/mild|medium|hot/)[0];
       session.step = "cilantro";
       return "Would you like to add cilantro? Yes or No?";
-    }
 
-    case "cilantro": {
-      session.order.cilantro = t.includes("yes");
-      session.step = "orderType";
-      return "Will this be pickup or delivery?";
-    }
-
-    case "orderType": {
-      if (t.includes("delivery")) {
-        session.order.orderType = "delivery";
-        session.step = "address";
-        return "Can I get the delivery address?";
-      }
-      if (t.includes("pickup")) {
-        session.order.orderType = "pickup";
-        session.step = "name";
-        return "May I have your name for the order?";
-      }
-      return "Is this pickup or delivery?";
-    }
-
-    case "address": {
-      session.order.address = message;
+    case "cilantro":
+      if (!/yes|no/.test(t)) return "Please say Yes or No.";
+      session.order.cilantro = /yes/.test(t);
       session.step = "name";
       return "May I have your name for the order?";
-    }
 
-    case "name": {
-      session.order.name = message;
+    case "name":
+      session.order.name = text.trim();
       session.step = "phone";
       return "Can I get a contact phone number?";
-    }
 
-    case "phone": {
-      session.order.phone = message;
+    case "phone":
+      session.order.phone = text.trim();
       session.step = "confirm";
-      return `
-Please confirm your order:
-${session.order.size} ${session.order.pizza}
-Spice: ${session.order.spice}
-Cilantro: ${session.order.cilantro ? "Yes" : "No"}
-${session.order.orderType === "delivery" ? "Delivery" : "Pickup"}
+      return `Please confirm: ${session.order.size} ${session.order.pizza}, Spice: ${session.order.spice}, Cilantro: ${session.order.cilantro ? "Yes" : "No"}, ${session.order.orderType}. Is that correct?`;
 
-Is that correct?
-      `;
-    }
+    case "confirm":
+      if (!/yes/.test(t)) {
+        session.step = "pizza";
+        return "No problem. Which pizza would you like instead?";
+      }
+      const ticket = createTicket(session.order, "CHAT");
+      sessions.delete(session);
+      return `✅ Order confirmed! Ticket #${ticket.ticketNo}. Your pizza will be ready in 20–25 minutes. Thank you for ordering Pizza 64 🍕`;
 
     default:
-      return null;
+      return "How can I help you?";
   }
 }
 
@@ -181,31 +181,13 @@ Is that correct?
 
 app.post("/chat", (req, res) => {
   const { sessionId, message } = req.body;
-  const session = getSession(sessionId);
-
-  // Final confirmation
-  if (session.step === "confirm") {
-    if (/yes|correct/.test(message.toLowerCase())) {
-      const ticket = createTicket(session.order, "CHAT");
-      sessions.delete(sessionId);
-
-      return res.json({
-        reply: `✅ Order confirmed!
-Ticket #${ticket.ticketNo}
-Your pizza will be ready in 20–25 minutes.
-Thank you for ordering Pizza 64 🍕`
-      });
-    }
-    return res.json({ reply: "No problem. What would you like to change?" });
-  }
-
-  // Normal flow
-  const reply = handleOrderFlow(session, message);
+  const session = getSession(sessionId, "+1000000000");
+  const reply = handleConversation(session, message);
   res.json({ reply });
 });
 
 /* =========================
-   CONFIRMED TICKETS API
+   TICKETS API
 ========================= */
 
 app.get("/api/tickets", (req, res) => {
@@ -218,11 +200,235 @@ app.get("/api/tickets", (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("🍕 Pizza 64 server running on port", PORT);
+  console.log("🍕 Pizza 64 running on", PORT);
 });
 
+//code 1.1
+// import "dotenv/config";
+// import express from "express";
+// import cors from "cors";
+// import path from "path";
+// import { fileURLToPath } from "url";
+
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+
+// const app = express();
+// app.use(cors());
+// app.use(express.json());
+// app.use(express.static(path.join(__dirname, "../public")));
+
+// /* =========================
+//    MENU (Pizza 64)
+// ========================= */
+
+// const MENU = [
+//   "Cheese Lovers",
+//   "Pepperoni",
+//   "Veggie Supreme",
+//   "Butter Chicken",
+//   "Shahi Paneer",
+//   "Tandoori Chicken"
+// ];
+
+// /* =========================
+//    SESSION MEMORY
+// ========================= */
+
+// const sessions = new Map();
+
+// function newSession(phone = null) {
+//   return {
+//     step: "pizza",
+//     order: {
+//       pizza: null,
+//       size: null,
+//       spice: null,
+//       cilantro: null,
+//       orderType: null,
+//       address: null,
+//       name: null,
+//       phone
+//     }
+//   };
+// }
+
+// function getSession(id, phone) {
+//   if (!sessions.has(id)) {
+//     sessions.set(id, newSession(phone));
+//   }
+//   return sessions.get(id);
+// }
+
+// /* =========================
+//    TICKET SYSTEM
+// ========================= */
+
+// let tickets = [];
+// let day = new Date().toDateString();
+// let counter = 1;
+
+// function nextTicket() {
+//   const today = new Date().toDateString();
+//   if (today !== day) {
+//     day = today;
+//     counter = 1;
+//   }
+//   return `${today.replace(/\s/g, "")}-${counter++}`;
+// }
+
+// function createTicket(order, source) {
+//   const ticket = {
+//     ticketNo: nextTicket(),
+//     time: new Date().toLocaleTimeString(),
+//     source,
+//     order
+//   };
+
+//   tickets.unshift(ticket);
+
+//   console.log("🎫 CONFIRMED TICKET:", ticket.ticketNo);
+//   console.log(ticket);
+
+//   return ticket;
+// }
+
+// /* =========================
+//    ORDER FLOW (CORE LOGIC)
+// ========================= */
+
+// function handleOrderFlow(session, message) {
+//   const t = message.toLowerCase();
+
+//   switch (session.step) {
+
+//     case "pizza": {
+//       const pizza = MENU.find(p => t.includes(p.toLowerCase()));
+//       if (!pizza) {
+//         return `We have ${MENU.join(", ")}. Which pizza would you like?`;
+//       }
+//       session.order.pizza = pizza;
+//       session.step = "size";
+//       return "What size would you like? Small, Medium, or Large?";
+//     }
+
+//     case "size": {
+//       if (!/small|medium|large/.test(t)) {
+//         return "Please choose a size: Small, Medium, or Large.";
+//       }
+//       session.order.size = t.match(/small|medium|large/)[0];
+//       session.step = "spice";
+//       return "How spicy would you like it? Mild, Medium, or Hot?";
+//     }
+
+//     case "spice": {
+//       if (!/mild|medium|hot/.test(t)) {
+//         return "Please choose spice level: Mild, Medium, or Hot.";
+//       }
+//       session.order.spice = t.match(/mild|medium|hot/)[0];
+//       session.step = "cilantro";
+//       return "Would you like to add cilantro? Yes or No?";
+//     }
+
+//     case "cilantro": {
+//       session.order.cilantro = t.includes("yes");
+//       session.step = "orderType";
+//       return "Will this be pickup or delivery?";
+//     }
+
+//     case "orderType": {
+//       if (t.includes("delivery")) {
+//         session.order.orderType = "delivery";
+//         session.step = "address";
+//         return "Can I get the delivery address?";
+//       }
+//       if (t.includes("pickup")) {
+//         session.order.orderType = "pickup";
+//         session.step = "name";
+//         return "May I have your name for the order?";
+//       }
+//       return "Is this pickup or delivery?";
+//     }
+
+//     case "address": {
+//       session.order.address = message;
+//       session.step = "name";
+//       return "May I have your name for the order?";
+//     }
+
+//     case "name": {
+//       session.order.name = message;
+//       session.step = "phone";
+//       return "Can I get a contact phone number?";
+//     }
+
+//     case "phone": {
+//       session.order.phone = message;
+//       session.step = "confirm";
+//       return `
+// Please confirm your order:
+// ${session.order.size} ${session.order.pizza}
+// Spice: ${session.order.spice}
+// Cilantro: ${session.order.cilantro ? "Yes" : "No"}
+// ${session.order.orderType === "delivery" ? "Delivery" : "Pickup"}
+
+// Is that correct?
+//       `;
+//     }
+
+//     default:
+//       return null;
+//   }
+// }
+
+// /* =========================
+//    CHAT API
+// ========================= */
+
+// app.post("/chat", (req, res) => {
+//   const { sessionId, message } = req.body;
+//   const session = getSession(sessionId);
+
+//   // Final confirmation
+//   if (session.step === "confirm") {
+//     if (/yes|correct/.test(message.toLowerCase())) {
+//       const ticket = createTicket(session.order, "CHAT");
+//       sessions.delete(sessionId);
+
+//       return res.json({
+//         reply: `✅ Order confirmed!
+// Ticket #${ticket.ticketNo}
+// Your pizza will be ready in 20–25 minutes.
+// Thank you for ordering Pizza 64 🍕`
+//       });
+//     }
+//     return res.json({ reply: "No problem. What would you like to change?" });
+//   }
+
+//   // Normal flow
+//   const reply = handleOrderFlow(session, message);
+//   res.json({ reply });
+// });
+
+// /* =========================
+//    CONFIRMED TICKETS API
+// ========================= */
+
+// app.get("/api/tickets", (req, res) => {
+//   res.json(tickets);
+// });
+
+// /* =========================
+//    SERVER
+// ========================= */
+
+// const PORT = process.env.PORT || 10000;
+// app.listen(PORT, () => {
+//   console.log("🍕 Pizza 64 server running on port", PORT);
+// });
 
 
+// another code 1.-0
 // import "dotenv/config";
 // import express from "express";
 // import cors from "cors";
