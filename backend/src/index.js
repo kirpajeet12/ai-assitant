@@ -84,9 +84,6 @@ function findPizza(text) {
   return null;
 }
 
-function isDone(text) {
-  return /(thats all|that’s all|no more|done|finish|nothing else)/i.test(text);
-}
 
 
 function isDone(text = "") {
@@ -170,13 +167,18 @@ function reply(session, msg) {
     session.current.cilantro = text.includes("yes") ? "Yes" : "No";
   }
 
- // Save pizza
+// Save pizza
 if (!session.current.saved) {
   session.items.push({ ...session.current });
+
+  // mark as saved
+  session.current.saved = true;
+
   session.current = {};
   session.awaitingMorePizza = true;
   return "Would you like to add another pizza or is that all?";
 }
+
 // Handle another pizza response
 if (session.awaitingMorePizza) {
   if (isDone(msg)) {
