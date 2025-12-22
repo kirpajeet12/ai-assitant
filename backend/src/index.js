@@ -167,29 +167,42 @@ function reply(session, msg) {
     session.current.cilantro = text.includes("yes") ? "Yes" : "No";
   }
 
-// Save pizza
-if (!session.current.saved) {
+// =========================
+// SAVE PIZZA (ONLY ONCE)
+// =========================
+if (
+  session.current.pizza &&
+  session.current.size &&
+  session.current.spice &&
+  session.current.cilantro !== undefined &&
+  !session.awaitingMorePizza
+) {
   session.items.push({ ...session.current });
 
-  // mark as saved
-  session.current.saved = true;
-
+  // reset current pizza
   session.current = {};
+
+  // pause flow and ask about more pizzas
   session.awaitingMorePizza = true;
   return "Would you like to add another pizza or is that all?";
 }
 
-// Handle another pizza response
+// =========================
+// HANDLE "ANOTHER PIZZA?" ANSWER
+// =========================
 if (session.awaitingMorePizza) {
   if (isDone(msg)) {
+    // user said NO / THAT'S ALL
     session.awaitingMorePizza = false;
-    // move on to name
+    // IMPORTANT: do NOT return → flow continues to name
   } else {
+    // user wants another pizza
     session.awaitingMorePizza = false;
     session.current = {};
     return "What pizza would you like? We have Cheese Lovers, Pepperoni, Veggie Supreme, Butter Chicken, Shahi Paneer, Tandoori Chicken.";
   }
 }
+
 
   
 
