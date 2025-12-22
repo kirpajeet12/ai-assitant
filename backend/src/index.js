@@ -1,10 +1,14 @@
 import express from "express";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const TICKETS_FILE = path.join(__dirname, "tickets.json");
+
 
 const app = express();
 app.use(cors());
@@ -30,6 +34,15 @@ const MENU = [
 
 const sessions = new Map();
 let tickets = [];
+
+if (fs.existsSync(TICKETS_FILE)) {
+  try {
+    tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
+  } catch (err) {
+    tickets = [];
+  }
+}
+
 
 let day = new Date().toDateString();
 let counter = 1;
@@ -220,23 +233,31 @@ ${session.orderType}
 Is that correct?`;
   }
 
-  if (text.includes("yes")) {
-    const ticket = {
-      id: nextTicket(),
-      time: new Date().toLocaleTimeString(),
-      name: session.name,
-      phone: session.phone,
-      orderType: session.orderType,
-      items: session.items
-    };
+ if (text.includes("yes")) {
+  const ticket = {
+    id: nextTicket(),
+    time: new Date().toLocaleTimeString(),
+    name: session.name,
+    phone: session.phone,
+    orderType: session.orderType,
+    items: session.items
+  };
 
-    tickets.unshift(ticket);
-    sessions.delete(session.id);
+  // ✅ ADD HERE
+  tickets.unshift(ticket);
 
-    return `✅ Order confirmed! Ticket #${ticket.id}
+  fs.writeFileSync(
+    TICKETS_FILE,
+    JSON.stringify(tickets, null, 2)
+  );
+
+  sessions.delete(session.id);
+
+  return `✅ Order confirmed! Ticket #${ticket.id}
 Your pizza will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
-  }
+}
+
 
   return "No problem — what would you like to change?";
 }
