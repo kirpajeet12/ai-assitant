@@ -48,6 +48,18 @@ function generateTicket() {
   return `P64-${today.replace(/\s/g, "")}-${count++}`;
 }
 
+
+//normalize 
+
+function normalize(text = "") {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "") // remove punctuation
+    .replace(/\s+/g, " ")        // collapse spaces
+    .trim();
+}
+
+
 /* =========================
    UTILS
 ========================= */
