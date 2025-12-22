@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Pizza 64 – Confirmed Orders</title>
+  <style>
+    body { font-family: Arial; background:#f7f7f7; padding:20px; }
+    .ticket {
+      background:#fff;
+      padding:12px;
+      border-radius:8px;
+      margin-bottom:10px;
+      box-shadow:0 2px 5px rgba(0,0,0,.1);
+    }
+    h3 { margin-top:0; color:#d35400; }
+  </style>
+</head>
+<body>
+
+<h2>🍕 Pizza 64 Kitchen Screen</h2>
+<h3>Confirmed Orders</h3>
+
+<div id="tickets"></div>
+
+<script>
+async function loadTickets() {
+  const res = await fetch("/api/tickets");
+  const tickets = await res.json();
+
+  const el = document.getElementById("tickets");
+  el.innerHTML = "";
+
+  tickets.forEach(t => {
+    el.innerHTML += `
+      <div class="ticket">
+        <b>Ticket #${t.id}</b><br>
+        Name: ${t.name}<br>
+        Phone: ${t.phone}<br>
+        Type: ${t.orderType}<br>
+        Items: ${t.items.map(i => i.name).join(", ")}
+      </div>
+    `;
+  });
+}
+
+loadTickets();
+setInterval(loadTickets, 3000);
+</script>
+
+</body>
+</html>
