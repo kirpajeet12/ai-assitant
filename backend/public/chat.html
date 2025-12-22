@@ -49,7 +49,13 @@
 </div>
 
 <script>
-  const sessionId = "chat-test-" + Math.random().toString(36).slice(2);
+  let sessionId = localStorage.getItem("pizza64_session");
+
+  if (!sessionId) {
+    sessionId = "chat-test-" + Math.random().toString(36).slice(2);
+    localStorage.setItem("pizza64_session", sessionId);
+  }
+
   const messagesEl = document.getElementById("messages");
   const inputEl = document.getElementById("input");
 
