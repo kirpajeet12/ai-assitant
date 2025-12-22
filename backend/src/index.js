@@ -2,13 +2,22 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
+import OpenAI from "openai";
 import { fileURLToPath } from "url";
 
+/* =========================
+   SETUP
+========================= */
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const TICKETS_FILE = path.join(__dirname, "tickets.json");
 
+const TICKETS_FILE = path.join(__dirname, "tickets.json");
+if (!fs.existsSync(TICKETS_FILE)) fs.writeFileSync(TICKETS_FILE, "[]");
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 const app = express();
 app.use(cors());
@@ -33,16 +42,7 @@ const MENU = [
 ========================= */
 
 const sessions = new Map();
-let tickets = [];
-
-if (fs.existsSync(TICKETS_FILE)) {
-  try {
-    tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
-  } catch (err) {
-    tickets = [];
-  }
-}
-
+let tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
 
 let day = new Date().toDateString();
 let counter = 1;
@@ -57,172 +57,119 @@ function nextTicket() {
 }
 
 /* =========================
-   HELPERS
+   AI: EXTRACT INFO
 ========================= */
 
-function normalize(text = "") {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+async function extractInfo(message) {
+  const prompt = `
+You work at Pizza 64.
+Extract structured data from user message.
+Return ONLY JSON.
+
+Format:
+{
+  "intent": "order_pizza | other",
+  "pizza": null | string,
+  "size": null | "Small" | "Medium" | "Large",
+  "spice": null | "Mild" | "Medium" | "Hot",
+  "orderType": null | "Pickup" | "Delivery",
+  "name": null | string,
+  "phone": null | string,
+  "done": true | false
 }
 
-function findPizza(text) {
-  const t = normalize(text);
+Menu: ${MENU.join(", ")}
 
-  for (const p of MENU) {
-    if (t.includes(normalize(p))) {
-      return { name: p, sure: true };
-    }
+Message:
+"${message}"
+`;
+
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [{ role: "system", content: prompt }]
+    });
+
+    return JSON.parse(res.choices[0].message.content);
+  } catch {
+    return {};
   }
-
-  const aliases = {
-    shai: "Shahi Paneer",
-    paneer: "Shahi Paneer",
-    paner: "Shahi Paneer",
-    tandori: "Tandoori Chicken",
-    veg: "Veggie Supreme"
-  };
-
-  for (const key in aliases) {
-    if (t.includes(key)) {
-      return { name: aliases[key], sure: false };
-    }
-  }
-
-  return null;
-}
-
-function isDone(text = "") {
-  return /^(no|nah|nope)$|no more|thats all|that’s all|done|finish|nothing else/i
-    .test(text.trim());
 }
 
 /* =========================
    CHAT LOGIC
 ========================= */
 
-function reply(session, msg) {
-  const text = normalize(msg);
+async function reply(session, msg) {
+  const ai = await extractInfo(msg);
 
-  /* ===== GREETING ===== */
+  /* === GREETING === */
   if (!session.started) {
     session.started = true;
-    return "Hi! Welcome to Pizza 64 🙂 Pickup or delivery?";
+    return "Hi! This is Pizza 64 🙂 How can I help you today?";
   }
 
-  /* ===== ORDER TYPE ===== */
+  /* === MERGE AI INFO SAFELY === */
+  if (ai.orderType && !session.orderType) session.orderType = ai.orderType;
+  if (ai.pizza && !session.current.pizza) session.current.pizza = ai.pizza;
+  if (ai.size && !session.current.size) session.current.size = ai.size;
+  if (ai.spice && !session.current.spice) session.current.spice = ai.spice;
+  if (ai.name && !session.name) session.name = ai.name;
+  if (ai.phone && !session.phone) session.phone = ai.phone;
+
+  /* === ORDER TYPE === */
   if (!session.orderType) {
-    if (text.includes("pickup")) session.orderType = "Pickup";
-    if (text.includes("delivery")) session.orderType = "Delivery";
-    if (!session.orderType) return "Pickup or delivery?";
+    return "Is this for pickup or delivery?";
   }
 
-  /* =====================================================
-     HANDLE “ANOTHER PIZZA?” ANSWER — MUST COME FIRST
-  ===================================================== */
-  if (session.awaitingMorePizza) {
-    if (isDone(msg)) {
-      session.awaitingMorePizza = false;
-      session.doneWithPizzas = true;
-    } else {
-      session.awaitingMorePizza = false;
-      session.current = {};
+  /* === PIZZA FLOW === */
+  if (!session.doneWithPizzas) {
+    if (!session.current.pizza) {
       return `What pizza would you like? We have ${MENU.join(", ")}.`;
     }
-  }
 
-  /* =====================================================
-     PIZZA FLOW (ONLY IF NOT DONE)
-  ===================================================== */
-  if (!session.doneWithPizzas) {
-
-    // Pizza
-    if (!session.current.pizza) {
-      const found = findPizza(msg);
-      if (!found) {
-        return `What pizza would you like? We have ${MENU.join(", ")}.`;
-      }
-      if (!found.sure) {
-        session.pendingPizza = found.name;
-        return `Did you mean ${found.name}?`;
-      }
-      session.current.pizza = found.name;
-    }
-
-    // Confirm fuzzy pizza
-    if (session.pendingPizza && !session.current.pizza) {
-      if (text.includes("yes")) {
-        session.current.pizza = session.pendingPizza;
-        session.pendingPizza = null;
-      } else {
-        session.pendingPizza = null;
-        return `Okay, please choose from ${MENU.join(", ")}.`;
-      }
-    }
-
-    // Size
     if (!session.current.size) {
-      if (text.includes("small")) session.current.size = "Small";
-      if (text.includes("medium")) session.current.size = "Medium";
-      if (text.includes("large")) session.current.size = "Large";
-      if (!session.current.size)
-        return "What size would you like? Small, Medium, or Large?";
+      return "What size would you like? Small, Medium, or Large?";
     }
 
-    // Spice
     if (!session.current.spice) {
-      if (text.includes("mild")) session.current.spice = "Mild";
-      if (text.includes("medium")) session.current.spice = "Medium";
-      if (text.includes("hot")) session.current.spice = "Hot";
-      if (!session.current.spice)
-        return "How spicy would you like it? Mild, Medium, or Hot?";
+      return "How spicy would you like it? Mild, Medium, or Hot?";
     }
 
-    // Cilantro
     if (session.current.cilantro === undefined) {
       session.current.cilantro = "ASK";
       return "Would you like to add cilantro? Yes or No?";
     }
 
     if (session.current.cilantro === "ASK") {
-      session.current.cilantro = text.includes("yes") ? "Yes" : "No";
+      session.current.cilantro = /yes/i.test(msg) ? "Yes" : "No";
     }
 
-    // Save pizza
-    if (
-      session.current.pizza &&
-      session.current.size &&
-      session.current.spice &&
-      session.current.cilantro !== undefined &&
-      !session.awaitingMorePizza
-    ) {
-      session.items.push({ ...session.current });
-      session.current = {};
-      session.awaitingMorePizza = true;
-      return "Would you like to add another pizza or is that all?";
-    }
+    session.items.push({ ...session.current });
+    session.current = {};
+    session.doneWithPizzas = true;
+
+    return "Would you like to add another pizza or is that all?";
   }
 
-  /* =====================================================
-     CUSTOMER DETAILS
-  ===================================================== */
+  /* === ADD MORE? === */
+  if (!session.confirming && ai.done === false) {
+    session.doneWithPizzas = false;
+    return `Sure 🙂 What pizza would you like next?`;
+  }
 
-  // Name (FIXED: actually save name)
+  /* === NAME === */
   if (!session.name) {
-    session.name = msg.trim();
+    return "May I have your name for the order?";
+  }
+
+  /* === PHONE === */
+  if (!session.phone) {
     return "Can I get a contact phone number?";
   }
 
-  // Phone
-  if (!session.phone) {
-    const match = msg.match(/\b\d{10}\b/);
-    if (!match) return "Can I get a contact phone number?";
-    session.phone = match[0];
-  }
-
-  // Confirmation
+  /* === CONFIRM === */
   if (!session.confirming) {
     session.confirming = true;
     return `Please confirm your order:
@@ -233,40 +180,35 @@ ${session.orderType}
 Is that correct?`;
   }
 
- if (text.includes("yes")) {
-  const ticket = {
-    id: nextTicket(),
-    time: new Date().toLocaleTimeString(),
-    name: session.name,
-    phone: session.phone,
-    orderType: session.orderType,
-    items: session.items
-  };
+  /* === FINAL CONFIRM === */
+  if (/yes|correct/i.test(msg)) {
+    const ticket = {
+      id: nextTicket(),
+      time: new Date().toLocaleTimeString(),
+      name: session.name,
+      phone: session.phone,
+      orderType: session.orderType,
+      items: session.items
+    };
 
-  // ✅ ADD HERE
-  tickets.unshift(ticket);
+    tickets.unshift(ticket);
+    fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
+    sessions.delete(session.id);
 
-  fs.writeFileSync(
-    TICKETS_FILE,
-    JSON.stringify(tickets, null, 2)
-  );
-
-  sessions.delete(session.id);
-
-  return `✅ Order confirmed! Ticket #${ticket.id}
+    return `✅ Order confirmed! Ticket #${ticket.id}
 Your pizza will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
-}
+  }
 
-
-  return "No problem — what would you like to change?";
+  session.confirming = false;
+  return "No problem 🙂 What would you like to change?";
 }
 
 /* =========================
    CHAT API
 ========================= */
 
-app.post("/chat", (req, res) => {
+app.post("/chat", async (req, res) => {
   const { sessionId, message } = req.body;
 
   if (!sessions.has(sessionId)) {
@@ -279,13 +221,13 @@ app.post("/chat", (req, res) => {
       name: null,
       phone: null,
       confirming: false,
-      awaitingMorePizza: false,
       doneWithPizzas: false
     });
   }
 
   const session = sessions.get(sessionId);
-  res.json({ reply: reply(session, message) });
+  const replyText = await reply(session, message);
+  res.json({ reply: replyText });
 });
 
 /* =========================
@@ -302,8 +244,321 @@ app.get("/api/tickets", (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("🍕 Pizza 64 running on port", PORT);
+  console.log("🍕 Pizza 64 AI assistant running on port", PORT);
 });
+
+
+
+// withpt ai version 
+
+
+
+// import express from "express";
+// import cors from "cors";
+// import path from "path";
+// import fs from "fs";
+// import { fileURLToPath } from "url";
+
+
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+// const TICKETS_FILE = path.join(__dirname, "tickets.json");
+
+
+// const app = express();
+// app.use(cors());
+// app.use(express.json());
+// app.use(express.static(path.join(__dirname, "../public")));
+
+// /* =========================
+//    MENU
+// ========================= */
+
+// const MENU = [
+//   "Cheese Lovers",
+//   "Pepperoni",
+//   "Veggie Supreme",
+//   "Butter Chicken",
+//   "Shahi Paneer",
+//   "Tandoori Chicken"
+// ];
+
+// /* =========================
+//    STORAGE
+// ========================= */
+
+// const sessions = new Map();
+// let tickets = [];
+
+// if (fs.existsSync(TICKETS_FILE)) {
+//   try {
+//     tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
+//   } catch (err) {
+//     tickets = [];
+//   }
+// }
+
+
+// let day = new Date().toDateString();
+// let counter = 1;
+
+// function nextTicket() {
+//   const today = new Date().toDateString();
+//   if (today !== day) {
+//     day = today;
+//     counter = 1;
+//   }
+//   return `P64-${today.replace(/\s/g, "")}-${counter++}`;
+// }
+
+// /* =========================
+//    HELPERS
+// ========================= */
+
+// function normalize(text = "") {
+//   return text
+//     .toLowerCase()
+//     .replace(/[^a-z0-9\s]/g, "")
+//     .replace(/\s+/g, " ")
+//     .trim();
+// }
+
+// function findPizza(text) {
+//   const t = normalize(text);
+
+//   for (const p of MENU) {
+//     if (t.includes(normalize(p))) {
+//       return { name: p, sure: true };
+//     }
+//   }
+
+//   const aliases = {
+//     shai: "Shahi Paneer",
+//     paneer: "Shahi Paneer",
+//     paner: "Shahi Paneer",
+//     tandori: "Tandoori Chicken",
+//     veg: "Veggie Supreme"
+//   };
+
+//   for (const key in aliases) {
+//     if (t.includes(key)) {
+//       return { name: aliases[key], sure: false };
+//     }
+//   }
+
+//   return null;
+// }
+
+// function isDone(text = "") {
+//   return /^(no|nah|nope)$|no more|thats all|that’s all|done|finish|nothing else/i
+//     .test(text.trim());
+// }
+
+// /* =========================
+//    CHAT LOGIC
+// ========================= */
+
+// function reply(session, msg) {
+//   const text = normalize(msg);
+
+//   /* ===== GREETING ===== */
+//   if (!session.started) {
+//     session.started = true;
+//     return "Hi! Welcome to Pizza 64 🙂 Pickup or delivery?";
+//   }
+
+//   /* ===== ORDER TYPE ===== */
+//   if (!session.orderType) {
+//     if (text.includes("pickup")) session.orderType = "Pickup";
+//     if (text.includes("delivery")) session.orderType = "Delivery";
+//     if (!session.orderType) return "Pickup or delivery?";
+//   }
+
+//   /* =====================================================
+//      HANDLE “ANOTHER PIZZA?” ANSWER — MUST COME FIRST
+//   ===================================================== */
+//   if (session.awaitingMorePizza) {
+//     if (isDone(msg)) {
+//       session.awaitingMorePizza = false;
+//       session.doneWithPizzas = true;
+//     } else {
+//       session.awaitingMorePizza = false;
+//       session.current = {};
+//       return `What pizza would you like? We have ${MENU.join(", ")}.`;
+//     }
+//   }
+
+//   /* =====================================================
+//      PIZZA FLOW (ONLY IF NOT DONE)
+//   ===================================================== */
+//   if (!session.doneWithPizzas) {
+
+//     // Pizza
+//     if (!session.current.pizza) {
+//       const found = findPizza(msg);
+//       if (!found) {
+//         return `What pizza would you like? We have ${MENU.join(", ")}.`;
+//       }
+//       if (!found.sure) {
+//         session.pendingPizza = found.name;
+//         return `Did you mean ${found.name}?`;
+//       }
+//       session.current.pizza = found.name;
+//     }
+
+//     // Confirm fuzzy pizza
+//     if (session.pendingPizza && !session.current.pizza) {
+//       if (text.includes("yes")) {
+//         session.current.pizza = session.pendingPizza;
+//         session.pendingPizza = null;
+//       } else {
+//         session.pendingPizza = null;
+//         return `Okay, please choose from ${MENU.join(", ")}.`;
+//       }
+//     }
+
+//     // Size
+//     if (!session.current.size) {
+//       if (text.includes("small")) session.current.size = "Small";
+//       if (text.includes("medium")) session.current.size = "Medium";
+//       if (text.includes("large")) session.current.size = "Large";
+//       if (!session.current.size)
+//         return "What size would you like? Small, Medium, or Large?";
+//     }
+
+//     // Spice
+//     if (!session.current.spice) {
+//       if (text.includes("mild")) session.current.spice = "Mild";
+//       if (text.includes("medium")) session.current.spice = "Medium";
+//       if (text.includes("hot")) session.current.spice = "Hot";
+//       if (!session.current.spice)
+//         return "How spicy would you like it? Mild, Medium, or Hot?";
+//     }
+
+//     // Cilantro
+//     if (session.current.cilantro === undefined) {
+//       session.current.cilantro = "ASK";
+//       return "Would you like to add cilantro? Yes or No?";
+//     }
+
+//     if (session.current.cilantro === "ASK") {
+//       session.current.cilantro = text.includes("yes") ? "Yes" : "No";
+//     }
+
+//     // Save pizza
+//     if (
+//       session.current.pizza &&
+//       session.current.size &&
+//       session.current.spice &&
+//       session.current.cilantro !== undefined &&
+//       !session.awaitingMorePizza
+//     ) {
+//       session.items.push({ ...session.current });
+//       session.current = {};
+//       session.awaitingMorePizza = true;
+//       return "Would you like to add another pizza or is that all?";
+//     }
+//   }
+
+//   /* =====================================================
+//      CUSTOMER DETAILS
+//   ===================================================== */
+
+//   // Name (FIXED: actually save name)
+//   if (!session.name) {
+//     session.name = msg.trim();
+//     return "Can I get a contact phone number?";
+//   }
+
+//   // Phone
+//   if (!session.phone) {
+//     const match = msg.match(/\b\d{10}\b/);
+//     if (!match) return "Can I get a contact phone number?";
+//     session.phone = match[0];
+//   }
+
+//   // Confirmation
+//   if (!session.confirming) {
+//     session.confirming = true;
+//     return `Please confirm your order:
+// ${session.items.map(
+//       i => `${i.size} ${i.pizza} (${i.spice}) Cilantro: ${i.cilantro}`
+//     ).join("\n")}
+// ${session.orderType}
+// Is that correct?`;
+//   }
+
+//  if (text.includes("yes")) {
+//   const ticket = {
+//     id: nextTicket(),
+//     time: new Date().toLocaleTimeString(),
+//     name: session.name,
+//     phone: session.phone,
+//     orderType: session.orderType,
+//     items: session.items
+//   };
+
+//   // ✅ ADD HERE
+//   tickets.unshift(ticket);
+
+//   fs.writeFileSync(
+//     TICKETS_FILE,
+//     JSON.stringify(tickets, null, 2)
+//   );
+
+//   sessions.delete(session.id);
+
+//   return `✅ Order confirmed! Ticket #${ticket.id}
+// Your pizza will be ready in 20–25 minutes.
+// Thank you for ordering Pizza 64 🍕`;
+// }
+
+
+//   return "No problem — what would you like to change?";
+// }
+
+// /* =========================
+//    CHAT API
+// ========================= */
+
+// app.post("/chat", (req, res) => {
+//   const { sessionId, message } = req.body;
+
+//   if (!sessions.has(sessionId)) {
+//     sessions.set(sessionId, {
+//       id: sessionId,
+//       started: false,
+//       items: [],
+//       current: {},
+//       orderType: null,
+//       name: null,
+//       phone: null,
+//       confirming: false,
+//       awaitingMorePizza: false,
+//       doneWithPizzas: false
+//     });
+//   }
+
+//   const session = sessions.get(sessionId);
+//   res.json({ reply: reply(session, message) });
+// });
+
+// /* =========================
+//    TICKETS API
+// ========================= */
+
+// app.get("/api/tickets", (req, res) => {
+//   res.json(tickets);
+// });
+
+// /* =========================
+//    SERVER
+// ========================= */
+
+// const PORT = process.env.PORT || 10000;
+// app.listen(PORT, () => {
+//   console.log("🍕 Pizza 64 running on port", PORT);
+// });
 
 //version
 // import express from "express";
