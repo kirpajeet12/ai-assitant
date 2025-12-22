@@ -88,6 +88,13 @@ function isDone(text) {
   return /(thats all|that’s all|no more|done|finish|nothing else)/i.test(text);
 }
 
+
+function isDone(text = "") {
+  return /^(no|nah|nope)$|no more|thats all|that’s all|done|finish|nothing else/i
+    .test(text.trim());
+}
+
+
 /* =========================
    CHAT LOGIC
 ========================= */
