@@ -51,24 +51,42 @@ function generateTicket() {
 /* =========================
    UTILS
 ========================= */
-
-function normalize(text) {
-  return text.toLowerCase().replace(/[^a-z0-9\s]/g, "");
-}
-
 function fuzzyPizza(text) {
   const clean = normalize(text);
-  for (const pizza of MENU) {
-    const key = normalize(pizza);
-    if (clean.includes(key)) return { match: pizza, sure: true };
 
-    // partial typo match
-    if (key.split(" ").some(w => clean.includes(w))) {
-      return { match: pizza, sure: false };
+  // 1. Exact match (strongest)
+  for (const pizza of MENU) {
+    if (clean.includes(normalize(pizza))) {
+      return { match: pizza, sure: true };
     }
   }
+
+  // 2. Word similarity score
+  let best = null;
+  let bestScore = 0;
+
+  for (const pizza of MENU) {
+    const words = normalize(pizza).split(" ");
+    let score = 0;
+
+    for (const w of words) {
+      if (clean.includes(w)) score++;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = pizza;
+    }
+  }
+
+  // 3. Only suggest if confidence is reasonable
+  if (best && bestScore >= 2) {
+    return { match: best, sure: false };
+  }
+
   return null;
 }
+
 
 function extractAll(text, session) {
   const t = normalize(text);
