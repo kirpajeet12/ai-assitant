@@ -37,13 +37,89 @@ async function getOpenAI() {
 ========================= */
 
 const MENU = [
-  { name: "Shahi Paneer Pizza", prices: { Medium: 13.49 } },
-  { name: "Butter Chicken Pizza", prices: { Medium: 13.99 } },
-  { name: "Tandoori Chicken Pizza", prices: { Medium: 14.99 } },
-  { name: "Veggie Supreme Pizza", prices: { Medium: 12.49 } },
-  { name: "Pepperoni Pizza", prices: { Medium: 12.99 } },
-  { name: "Cheese Pizza", prices: { Medium: 11.99 } }
+  // ======================
+  // SPECIALTY PIZZAS
+  // ======================
+  {
+    name: "Cheese Lovers",
+    category: "Specialty",
+    toppings: ["Mozzarella Cheese", "Pizza Sauce"],
+    prices: { Small: 9.99, Medium: 11.99, Large: 14.99 },
+    spicy: false
+  },
+  {
+    name: "Pepperoni",
+    category: "Specialty",
+    toppings: ["Pepperoni", "Mozzarella Cheese", "Pizza Sauce"],
+    prices: { Small: 10.99, Medium: 12.99, Large: 15.99 },
+    spicy: false
+  },
+  {
+    name: "Hawaiian",
+    category: "Specialty",
+    toppings: ["Ham", "Pineapple", "Mozzarella Cheese", "Pizza Sauce"],
+    prices: { Small: 10.99, Medium: 12.99, Large: 15.99 },
+    spicy: false
+  },
+  {
+    name: "Canadian",
+    category: "Specialty",
+    toppings: ["Pepperoni", "Bacon", "Mushrooms", "Mozzarella Cheese", "Pizza Sauce"],
+    prices: { Small: 11.99, Medium: 13.99, Large: 16.99 },
+    spicy: false
+  },
+
+  // ======================
+  // SIGNATURE PIZZAS
+  // ======================
+  {
+    name: "Meat Lovers",
+    category: "Signature",
+    toppings: ["Pepperoni", "Ham", "Beef", "Italian Sausage", "Mozzarella Cheese"],
+    prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
+    spicy: false
+  },
+  {
+    name: "BBQ Chicken",
+    category: "Signature",
+    toppings: ["Chicken", "Onions", "Green Peppers", "BBQ Sauce", "Mozzarella Cheese"],
+    prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
+    spicy: false
+  },
+  {
+    name: "Tandoori Chicken",
+    category: "Signature",
+    toppings: ["Tandoori Chicken", "Onions", "Green Peppers", "Mozzarella Cheese"],
+    prices: { Small: 12.99, Medium: 14.99, Large: 17.99 },
+    spicy: true
+  },
+
+  // ======================
+  // GOURMET PIZZAS
+  // ======================
+  {
+    name: "Butter Chicken",
+    category: "Gourmet",
+    toppings: ["Butter Chicken", "Onions", "Green Peppers", "Jalapenos", "Mozzarella Cheese"],
+    prices: { Small: 13.49, Medium: 15.49, Large: 18.49 },
+    spicy: true
+  },
+  {
+    name: "Shahi Paneer",
+    category: "Gourmet",
+    toppings: ["Tandoori Paneer", "Onions", "Spinach", "Mushrooms", "Mozzarella Cheese"],
+    prices: { Small: 13.49, Medium: 15.49, Large: 18.49 },
+    spicy: true
+  },
+  {
+    name: "Passion of India",
+    category: "Gourmet",
+    toppings: ["Paneer", "Spinach", "Mushrooms", "Green Peppers", "Mozzarella Cheese"],
+    prices: { Small: 13.99, Medium: 15.99, Large: 18.99 },
+    spicy: true
+  }
 ];
+
 
 /* =========================
    SYSTEM PROMPT
