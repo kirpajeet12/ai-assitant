@@ -163,18 +163,26 @@ function reply(session, msg) {
     session.current.cilantro = text.includes("yes") ? "Yes" : "No";
   }
 
-  // Save pizza
-  if (!session.current.saved) {
-    session.items.push({ ...session.current });
+ // Save pizza
+if (!session.current.saved) {
+  session.items.push({ ...session.current });
+  session.current = {};
+  session.awaitingMorePizza = true;
+  return "Would you like to add another pizza or is that all?";
+}
+// Handle another pizza response
+if (session.awaitingMorePizza) {
+  if (isDone(msg)) {
+    session.awaitingMorePizza = false;
+    // move on to name
+  } else {
+    session.awaitingMorePizza = false;
     session.current = {};
-    return "Would you like to add another pizza or is that all?";
+    return "What pizza would you like? We have Cheese Lovers, Pepperoni, Veggie Supreme, Butter Chicken, Shahi Paneer, Tandoori Chicken.";
   }
+}
 
-  // End pizza loop
-  if (!session.addingMore) {
-    if (isDone(msg)) session.addingMore = false;
-    else return "What pizza would you like next?";
-  }
+  
 
   // Name
   if (!session.name) {
