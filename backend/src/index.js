@@ -26,12 +26,6 @@ const MENU = [
 ];
 
 /* =========================
-   SESSIONS
-========================= */
-
-const sessions = new Map();
-
-/* =========================
    TICKETS
 ========================= */
 
@@ -48,105 +42,78 @@ function generateTicket() {
   return `P64-${today.replace(/\s/g, "")}-${count++}`;
 }
 
+/* =========================
+   SESSIONS
+========================= */
 
-//normalize 
+const sessions = new Map();
+
+function newSession(id) {
+  return {
+    id,
+    step: "ORDER_TYPE",
+    items: [],
+    current: {},
+    name: null,
+    phone: null,
+    orderType: null,
+    pendingPizza: null,
+    confirming: false
+  };
+}
+
+/* =========================
+   HELPERS
+========================= */
 
 function normalize(text = "") {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "") // remove punctuation
-    .replace(/\s+/g, " ")        // collapse spaces
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
+function isDone(text) {
+  const t = normalize(text);
+  return (
+    t === "no" ||
+    t === "thats all" ||
+    t === "that is all" ||
+    t === "done" ||
+    t === "no other pizza" ||
+    t === "nothing else"
+  );
+}
 
-/* =========================
-   UTILS
-========================= */
 function fuzzyPizza(text) {
   const clean = normalize(text);
 
-  // 1. Exact match (strongest)
   for (const pizza of MENU) {
     if (clean.includes(normalize(pizza))) {
       return { match: pizza, sure: true };
     }
   }
 
-  // 2. Word similarity score
   let best = null;
-  let bestScore = 0;
+  let score = 0;
 
   for (const pizza of MENU) {
-    const words = normalize(pizza).split(" ");
-    let score = 0;
-
-    for (const w of words) {
-      if (clean.includes(w)) score++;
+    let s = 0;
+    for (const w of normalize(pizza).split(" ")) {
+      if (clean.includes(w)) s++;
     }
-
-    if (score > bestScore) {
-      bestScore = score;
+    if (s > score) {
+      score = s;
       best = pizza;
     }
   }
 
-  // 3. Only suggest if confidence is reasonable
-  if (best && bestScore >= 2) {
+  if (best && score >= 1) {
     return { match: best, sure: false };
   }
 
   return null;
-}
-
-
-function extractAll(text, session) {
-  const t = normalize(text);
-
-  // quantity
-  const q = t.match(/\b(\d+)\b/);
-  if (q && !session.current.qty) session.current.qty = parseInt(q[1]);
-
-  // size
-  if (!session.current.size) {
-    if (t.includes("small")) session.current.size = "Small";
-    if (t.includes("medium")) session.current.size = "Medium";
-    if (t.includes("large")) session.current.size = "Large";
-  }
-
-  // spice
-  if (!session.current.spice) {
-    if (t.includes("mild")) session.current.spice = "Mild";
-    if (t.includes("medium")) session.current.spice = "Medium";
-    if (t.includes("hot")) session.current.spice = "Hot";
-  }
-
-  // pickup / delivery
-  if (!session.orderType) {
-    if (t.includes("pickup")) session.orderType = "Pickup";
-    if (t.includes("delivery")) session.orderType = "Delivery";
-  }
-
-  // phone
-  const phone = t.match(/\b\d{10}\b/);
-  if (phone && !session.phone) session.phone = phone[0];
-
-  // name (single word assumption)
-  if (!session.name && /^[a-z]{3,}$/.test(t)) {
-    session.name = text.trim();
-  }
-
-  // pizza
-  if (!session.current.pizza) {
-    const found = fuzzyPizza(text);
-    if (found) {
-      if (found.sure) {
-        session.current.pizza = found.match;
-      } else {
-        session.pendingPizza = found.match;
-      }
-    }
-  }
 }
 
 /* =========================
@@ -154,90 +121,141 @@ function extractAll(text, session) {
 ========================= */
 
 function reply(session, message) {
-  extractAll(message, session);
+  const text = normalize(message);
 
-  // typo confirmation
-  if (session.pendingPizza && !session.current.pizza) {
-    if (normalize(message).includes("yes")) {
-      session.current.pizza = session.pendingPizza;
-      session.pendingPizza = null;
-      return "Got it 👍 What size would you like?";
+  /* GREETING */
+  if (session.step === "ORDER_TYPE") {
+    if (text.includes("pickup")) {
+      session.orderType = "Pickup";
+      session.step = "PIZZA";
+      return "Great 👍 What pizza would you like?";
     }
-    return `Did you mean ${session.pendingPizza}?`;
-  }
-
-  if (!session.orderType) {
+    if (text.includes("delivery")) {
+      session.orderType = "Delivery";
+      session.step = "PIZZA";
+      return "Sure 👍 What pizza would you like?";
+    }
     return "Hi! Welcome to Pizza 64 🙂 Pickup or delivery?";
   }
 
-  if (!session.current.pizza) {
-    return `What pizza would you like? We have ${MENU.join(", ")}.`;
-  }
+  /* PIZZA */
+  if (session.step === "PIZZA") {
+    const found = fuzzyPizza(message);
 
-  if (!session.current.size) {
+    if (!found) {
+      return `What pizza would you like? We have ${MENU.join(", ")}.`;
+    }
+
+    if (!found.sure) {
+      session.pendingPizza = found.match;
+      return `Did you mean ${found.match}?`;
+    }
+
+    session.current.pizza = found.match;
+    session.step = "SIZE";
     return "What size would you like? Small, Medium, or Large?";
   }
 
-  if (!session.current.spice) {
+  /* CONFIRM TYPO */
+  if (session.pendingPizza) {
+    if (text.includes("yes")) {
+      session.current.pizza = session.pendingPizza;
+      session.pendingPizza = null;
+      session.step = "SIZE";
+      return "Got it 👍 What size would you like?";
+    }
+    session.pendingPizza = null;
+    return `Okay, please choose from ${MENU.join(", ")}.`;
+  }
+
+  /* SIZE */
+  if (session.step === "SIZE") {
+    if (text.includes("small")) session.current.size = "Small";
+    else if (text.includes("medium")) session.current.size = "Medium";
+    else if (text.includes("large")) session.current.size = "Large";
+    else return "Please choose Small, Medium, or Large.";
+
+    session.step = "SPICE";
     return "How spicy would you like it? Mild, Medium, or Hot?";
   }
 
-  if (!session.current.cilantro) {
-    session.current.cilantro = "ASK";
+  /* SPICE */
+  if (session.step === "SPICE") {
+    if (text.includes("mild")) session.current.spice = "Mild";
+    else if (text.includes("medium")) session.current.spice = "Medium";
+    else if (text.includes("hot")) session.current.spice = "Hot";
+    else return "Mild, Medium, or Hot?";
+
+    session.step = "CILANTRO";
     return "Would you like to add cilantro? Yes or No?";
   }
 
-  if (session.current.cilantro === "ASK") {
-    session.current.cilantro =
-      normalize(message).includes("yes") ? "Yes" : "No";
-  }
+  /* CILANTRO */
+  if (session.step === "CILANTRO") {
+    session.current.cilantro = text.includes("yes") ? "Yes" : "No";
 
-  // finalize pizza
-  if (!session.current.done) {
-    session.items.push({
-      qty: session.current.qty || 1,
-      pizza: session.current.pizza,
-      size: session.current.size,
-      spice: session.current.spice,
-      cilantro: session.current.cilantro
-    });
-
+    session.items.push({ ...session.current, qty: 1 });
     session.current = {};
+    session.step = "MORE";
+
     return "Would you like to add another pizza or is that all?";
   }
 
-  if (!session.name) return "May I have your name for the order?";
-  if (!session.phone) return "Can I get a contact phone number?";
+  /* MORE */
+  if (session.step === "MORE") {
+    if (isDone(message)) {
+      session.step = "NAME";
+      return "May I have your name for the order?";
+    }
+    session.step = "PIZZA";
+    return "Sure! What pizza would you like next?";
+  }
 
-  if (!session.confirming) {
-    session.confirming = true;
-    return `Please confirm your order:
+  /* NAME */
+  if (session.step === "NAME") {
+    session.name = message.trim();
+    session.step = "PHONE";
+    return "Can I get a contact phone number?";
+  }
+
+  /* PHONE */
+  if (session.step === "PHONE") {
+    const m = message.match(/\d{10}/);
+    if (!m) return "Please enter a 10-digit phone number.";
+    session.phone = m[0];
+    session.step = "CONFIRM";
+  }
+
+  /* CONFIRM */
+  if (session.step === "CONFIRM") {
+    if (!session.confirming) {
+      session.confirming = true;
+      return `Please confirm your order:
 ${session.items.map(i =>
-      `${i.qty} ${i.size} ${i.pizza} (${i.spice}) Cilantro: ${i.cilantro}`
-    ).join("\n")}
+        `• ${i.size} ${i.pizza} (${i.spice}) Cilantro: ${i.cilantro}`
+      ).join("\n")}
 ${session.orderType}
 Is that correct?`;
-  }
+    }
 
-  if (normalize(message).includes("yes")) {
-    const ticket = {
-      id: generateTicket(),
-      time: new Date().toLocaleTimeString(),
-      name: session.name,
-      phone: session.phone,
-      orderType: session.orderType,
-      items: session.items
-    };
+    if (text.includes("yes")) {
+      const ticket = {
+        id: generateTicket(),
+        time: new Date().toLocaleTimeString(),
+        ...session
+      };
+      tickets.unshift(ticket);
+      sessions.delete(session.id);
 
-    tickets.unshift(ticket);
-    sessions.delete(session.id);
-
-    return `✅ Order confirmed! Ticket #${ticket.id}
+      return `✅ Order confirmed! Ticket #${ticket.id}
 Your pizza will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
-  }
+    }
 
-  return "No problem — what would you like to change?";
+    session.confirming = false;
+    session.step = "PIZZA";
+    return "No problem — what would you like to change?";
+  }
 }
 
 /* =========================
@@ -248,24 +266,15 @@ app.post("/chat", (req, res) => {
   const { sessionId, message } = req.body;
 
   if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, {
-      id: sessionId,
-      items: [],
-      current: {},
-      name: null,
-      phone: null,
-      orderType: null,
-      confirming: false
-    });
+    sessions.set(sessionId, newSession(sessionId));
   }
 
   const session = sessions.get(sessionId);
-  const text = reply(session, message);
-  res.json({ reply: text });
+  res.json({ reply: reply(session, message) });
 });
 
 /* =========================
-   CONFIRMED TICKETS
+   TICKETS API
 ========================= */
 
 app.get("/api/tickets", (req, res) => {
@@ -280,7 +289,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 running on", PORT);
 });
-
 
 //version 
 
