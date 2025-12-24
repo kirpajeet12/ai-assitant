@@ -17,24 +17,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
-/* =========================
-   DATA FILE
-========================= */
-
-const TICKETS_FILE = path.join(__dirname, "tickets.json");
-if (!fs.existsSync(TICKETS_FILE)) fs.writeFileSync(TICKETS_FILE, "[]");
-let tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
+const PORT = process.env.PORT || 10000;
 
 /* =========================
-   OPENAI (EXTRACTION ONLY)
-========================= */
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-/* =========================
-   MENU
+   DATA
 ========================= */
 
 const MENU = [
@@ -54,46 +40,38 @@ const SIDES = [
   "Sprite"
 ];
 
-/* =========================
-   TICKET NUMBER
-========================= */
+const TICKETS_FILE = path.join(__dirname, "tickets.json");
+if (!fs.existsSync(TICKETS_FILE)) fs.writeFileSync(TICKETS_FILE, "[]");
 
-let day = new Date().toDateString();
-let counter = 1;
-
-function nextTicket() {
-  const today = new Date().toDateString();
-  if (today !== day) {
-    day = today;
-    counter = 1;
-  }
-  return `P64-${today.replace(/\s/g, "")}-${counter++}`;
-}
+let tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
 
 /* =========================
-   AI EXTRACTION
+   OPENAI (EXTRACTION ONLY)
 ========================= */
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 async function extract(message) {
   const prompt = `
-You work at Pizza 64.
-Extract structured order information.
+Extract order info from the customer message.
 Return ONLY valid JSON.
 
 Menu pizzas: ${MENU.join(", ")}
 Sides: ${SIDES.join(", ")}
 
 Rules:
+- Do NOT invent pizzas
 - Quantity defaults to 1
-- If info missing, use null
-- Do not invent items
+- Missing fields must be null
 
 JSON format:
 {
   "orderType": "Pickup" | "Delivery" | null,
   "pizzas": [
     {
-      "name": string,
+      "name": string | null,
       "size": "Small" | "Medium" | "Large" | null,
       "spice": "Mild" | "Medium" | "Hot" | null,
       "qty": number
@@ -102,7 +80,7 @@ JSON format:
   "sides": [string]
 }
 
-Customer message:
+Message:
 "${message}"
 `;
 
@@ -125,36 +103,45 @@ Customer message:
 const sessions = new Map();
 
 /* =========================
-   HELPER: NEXT QUESTION
+   FLOW DECISION
 ========================= */
 
 function nextQuestion(session) {
+  // 1️⃣ NO PIZZA YET
+  if (session.pizzas.length === 0) {
+    return "Sure 🙂 What pizza would you like?";
+  }
+
+  // 2️⃣ COMPLETE PIZZAS
+  const p = session.pizzas.find(
+    x => !x.size || !x.spice || x.cilantro === null
+  );
+
+  if (p) {
+    if (!p.size) return `What size would you like for the ${p.name}?`;
+    if (!p.spice)
+      return `How spicy would you like the ${p.name}? Mild, Medium, or Hot?`;
+    if (p.cilantro === null)
+      return `Would you like cilantro on the ${p.name}? Yes or No?`;
+  }
+
+  // 3️⃣ PICKUP / DELIVERY
   if (!session.orderType) {
     return "Is this for pickup or delivery?";
   }
 
-  const incompletePizza = session.pizzas.find(
-    p => !p.size || !p.spice || p.cilantro === null
-  );
-
-  if (incompletePizza) {
-    if (!incompletePizza.size)
-      return `What size would you like for the ${incompletePizza.name}?`;
-    if (!incompletePizza.spice)
-      return `How spicy should the ${incompletePizza.name}? Mild, Medium, or Hot?`;
-    if (incompletePizza.cilantro === null)
-      return `Would you like cilantro on the ${incompletePizza.name}? Yes or No?`;
-  }
-
+  // 4️⃣ SIDES
   if (!session.sidesAsked) {
     session.sidesAsked = true;
     return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
   }
 
+  // 5️⃣ NAME
   if (!session.name) {
     return "May I have your name for the order?";
   }
 
+  // 6️⃣ PHONE
   if (!session.phone) {
     return "Can I get a contact phone number?";
   }
@@ -176,17 +163,17 @@ async function reply(session, msg) {
   }
 
   /* ===== MERGE ORDER TYPE ===== */
-  if (ai.orderType && !session.orderType) {
-    session.orderType = ai.orderType;
-  }
+  if (ai.orderType) session.orderType = ai.orderType;
 
   /* ===== MERGE PIZZAS ===== */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
+      if (!p.name) continue; // 🚨 NEVER ADD NULL PIZZA
+
       session.pizzas.push({
         name: p.name,
-        size: p.size,
-        spice: p.spice,
+        size: p.size || null,
+        spice: p.spice || null,
         qty: p.qty || 1,
         cilantro: null
       });
@@ -198,24 +185,52 @@ async function reply(session, msg) {
     session.sides.push(...ai.sides);
   }
 
-  /* ===== HANDLE YES / NO FOR CILANTRO ===== */
-  const lastPizza = session.pizzas.find(p => p.cilantro === null);
-  if (lastPizza && /yes|no/i.test(msg)) {
-    lastPizza.cilantro = /yes/i.test(msg) ? "Yes" : "No";
+  /* ===== ANSWER MISSING PIZZA QUESTIONS ===== */
+  const active = session.pizzas.find(
+    x => !x.size || !x.spice || x.cilantro === null
+  );
+
+  if (active) {
+    const t = msg.toLowerCase();
+
+    if (!active.size && /small|medium|large/.test(t)) {
+      active.size = t.match(/small|medium|large/i)[0]
+        .charAt(0)
+        .toUpperCase() + t.match(/small|medium|large/i)[0].slice(1);
+    }
+
+    if (!active.spice && /mild|medium|hot/.test(t)) {
+      active.spice = t.match(/mild|medium|hot/i)[0]
+        .charAt(0)
+        .toUpperCase() + t.match(/mild|medium|hot/i)[0].slice(1);
+    }
+
+    if (active.cilantro === null && /yes|no/.test(t)) {
+      active.cilantro = /yes/.test(t) ? "Yes" : "No";
+    }
   }
 
-  /* ===== ASK NEXT QUESTION ===== */
+  /* ===== CUSTOMER INFO ===== */
+  if (!session.name && session.sidesAsked && !session.confirming) {
+    if (!/\d/.test(msg)) session.name = msg.trim();
+  }
+
+  if (!session.phone) {
+    const m = msg.match(/\b\d{10}\b/);
+    if (m) session.phone = m[0];
+  }
+
+  /* ===== CONFIRM ===== */
   const next = nextQuestion(session);
 
   if (next === "confirm") {
-    if (!session.confirming) {
-      session.confirming = true;
-      return `Please confirm your order:
+    session.confirming = true;
+    return `Please confirm your order:
 
 PIZZAS:
 ${session.pizzas.map(
-        p => `${p.qty}× ${p.size} ${p.name} (${p.spice}) Cilantro: ${p.cilantro}`
-      ).join("\n")}
+      p => `${p.qty}× ${p.size} ${p.name} (${p.spice}) Cilantro: ${p.cilantro}`
+    ).join("\n")}
 
 SIDES:
 ${session.sides.length ? session.sides.join(", ") : "None"}
@@ -223,37 +238,34 @@ ${session.sides.length ? session.sides.join(", ") : "None"}
 ${session.orderType}
 
 Is that correct?`;
-    }
+  }
 
-    if (/yes|correct/i.test(msg)) {
-      const ticket = {
-        id: nextTicket(),
-        time: new Date().toLocaleTimeString(),
-        name: session.name,
-        phone: session.phone,
-        orderType: session.orderType,
-        pizzas: session.pizzas,
-        sides: session.sides
-      };
+  /* ===== FINAL YES ===== */
+  if (session.confirming && /yes|correct/i.test(msg)) {
+    const ticket = {
+      id: `P64-${Date.now()}`,
+      time: new Date().toLocaleTimeString(),
+      name: session.name,
+      phone: session.phone,
+      orderType: session.orderType,
+      pizzas: session.pizzas,
+      sides: session.sides
+    };
 
-      tickets.unshift(ticket);
-      fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
-      sessions.delete(session.id);
+    tickets.unshift(ticket);
+    fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
+    sessions.delete(session.id);
 
-      return `✅ Order confirmed! Ticket #${ticket.id}
+    return `✅ Order confirmed! Ticket #${ticket.id}
 Your order will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
-    }
-
-    session.confirming = false;
-    return "No problem 🙂 What would you like to change?";
   }
 
   return next;
 }
 
 /* =========================
-   CHAT API
+   API
 ========================= */
 
 app.post("/chat", async (req, res) => {
@@ -274,25 +286,20 @@ app.post("/chat", async (req, res) => {
   }
 
   const session = sessions.get(sessionId);
-  const response = await reply(session, message);
-  res.json({ reply: response });
+  const replyText = await reply(session, message);
+  res.json({ reply: replyText });
 });
-
-/* =========================
-   HEALTH
-========================= */
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "Pizza 64 AI Assistant" });
 });
 
-/* =========================
-   SERVER
-========================= */
+app.get("/api/tickets", (req, res) => {
+  res.json(tickets);
+});
 
-const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("🍕 Pizza 64 AI assistant running on port", PORT);
+  console.log("🍕 Pizza 64 AI Assistant running on port", PORT);
 });
 
 // vesion 1.2
