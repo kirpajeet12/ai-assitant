@@ -240,28 +240,29 @@ ${session.orderType}
 Is that correct?`;
   }
 
-  /* ===== FINAL YES ===== */
-  if (session.confirming && /yes|correct/i.test(msg)) {
-    const ticket = {
-      id: `P64-${Date.now()}`,
-      time: new Date().toLocaleTimeString(),
-      name: session.name,
-      phone: session.phone,
-      orderType: session.orderType,
-      pizzas: session.pizzas,
-      sides: session.sides
-    };
+ /* ===== FINAL YES ===== */
+if (session.confirming && /yes|correct/i.test(msg)) {
+  session.confirming = false;        // 🔒 stop re-entry
+  session.completed = true;          // 🔒 hard lock
 
-    tickets.unshift(ticket);
-    fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
-    sessions.delete(session.id);
+  const ticket = {
+    id: `P64-${Date.now()}`,
+    time: new Date().toLocaleTimeString(),
+    name: session.name,
+    phone: session.phone,
+    orderType: session.orderType,
+    pizzas: session.pizzas,
+    sides: session.sides
+  };
 
-    return `✅ Order confirmed! Ticket #${ticket.id}
+  tickets.unshift(ticket);
+  fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
+
+  sessions.delete(session.id);        // ✅ DESTROY SESSION
+
+  return `✅ Order confirmed! Ticket #${ticket.id}
 Your order will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
-  }
-
-  return next;
 }
 
 /* =========================
