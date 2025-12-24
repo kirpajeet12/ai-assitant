@@ -8,10 +8,6 @@ import { fileURLToPath } from "url";
 /* =========================
    BASIC SETUP
 ========================= */
-// const app = express();
-// app.use(cors());
-// app.use(express.json());
-// app.use(express.static(path.join(__dirname, "../public")));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,17 +15,14 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "../public"))); // ✅ FIX WHITE SCREEN
+app.use(express.static(path.join(__dirname, "../public")));
 
 /* =========================
    DATA FILE
 ========================= */
 
 const TICKETS_FILE = path.join(__dirname, "tickets.json");
-if (!fs.existsSync(TICKETS_FILE)) {
-  fs.writeFileSync(TICKETS_FILE, "[]");
-}
-
+if (!fs.existsSync(TICKETS_FILE)) fs.writeFileSync(TICKETS_FILE, "[]");
 let tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
 
 /* =========================
@@ -78,16 +71,22 @@ function nextTicket() {
 }
 
 /* =========================
-   AI EXTRACTION (SAFE)
+   AI EXTRACTION
 ========================= */
 
 async function extract(message) {
   const prompt = `
-You extract order info for Pizza 64.
+You work at Pizza 64.
+Extract structured order information.
 Return ONLY valid JSON.
 
 Menu pizzas: ${MENU.join(", ")}
 Sides: ${SIDES.join(", ")}
+
+Rules:
+- Quantity defaults to 1
+- If info missing, use null
+- Do not invent items
 
 JSON format:
 {
@@ -103,7 +102,7 @@ JSON format:
   "sides": [string]
 }
 
-Message:
+Customer message:
 "${message}"
 `;
 
@@ -113,7 +112,6 @@ Message:
       temperature: 0,
       messages: [{ role: "system", content: prompt }]
     });
-
     return JSON.parse(res.choices[0].message.content);
   } catch {
     return {};
@@ -125,6 +123,44 @@ Message:
 ========================= */
 
 const sessions = new Map();
+
+/* =========================
+   HELPER: NEXT QUESTION
+========================= */
+
+function nextQuestion(session) {
+  if (!session.orderType) {
+    return "Is this for pickup or delivery?";
+  }
+
+  const incompletePizza = session.pizzas.find(
+    p => !p.size || !p.spice || p.cilantro === null
+  );
+
+  if (incompletePizza) {
+    if (!incompletePizza.size)
+      return `What size would you like for the ${incompletePizza.name}?`;
+    if (!incompletePizza.spice)
+      return `How spicy should the ${incompletePizza.name}? Mild, Medium, or Hot?`;
+    if (incompletePizza.cilantro === null)
+      return `Would you like cilantro on the ${incompletePizza.name}? Yes or No?`;
+  }
+
+  if (!session.sidesAsked) {
+    session.sidesAsked = true;
+    return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
+  }
+
+  if (!session.name) {
+    return "May I have your name for the order?";
+  }
+
+  if (!session.phone) {
+    return "Can I get a contact phone number?";
+  }
+
+  return "confirm";
+}
 
 /* =========================
    CHAT ENGINE
@@ -139,19 +175,15 @@ async function reply(session, msg) {
     return "Hi! This is Pizza 64 🙂 How can I help you today?";
   }
 
-  /* ===== ORDER TYPE ===== */
+  /* ===== MERGE ORDER TYPE ===== */
   if (ai.orderType && !session.orderType) {
     session.orderType = ai.orderType;
   }
 
-  if (!session.orderType) {
-    return "Is this for pickup or delivery?";
-  }
-
-  /* ===== ADD PIZZAS FROM AI ===== */
+  /* ===== MERGE PIZZAS ===== */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
-      session.pending.push({
+      session.pizzas.push({
         name: p.name,
         size: p.size,
         spice: p.spice,
@@ -161,59 +193,29 @@ async function reply(session, msg) {
     }
   }
 
-  /* ===== COMPLETE CURRENT PIZZA ===== */
-  const incomplete = session.pending.find(
-    p => !p.size || !p.spice || p.cilantro === null
-  );
-
-  if (incomplete) {
-    if (!incomplete.size)
-      return `What size would you like for the ${incomplete.name}?`;
-
-    if (!incomplete.spice)
-      return `How spicy should the ${incomplete.name}? Mild, Medium, or Hot?`;
-
-    if (incomplete.cilantro === null)
-      return `Would you like cilantro on the ${incomplete.name}? Yes or No?`;
-  }
-
-  /* ===== FINALIZE PIZZAS ===== */
-  while (session.pending.length) {
-    session.items.push(session.pending.shift());
-  }
-
-  /* ===== SIDES ===== */
-  if (!session.sidesAsked) {
-    session.sidesAsked = true;
-    return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
-  }
-
+  /* ===== MERGE SIDES ===== */
   if (ai.sides?.length) {
     session.sides.push(...ai.sides);
   }
 
-  /* ===== NAME (FIXED) ===== */
-  if (!session.name) {
-    session.name = msg.trim();
-    return "Can I get a contact phone number?";
+  /* ===== HANDLE YES / NO FOR CILANTRO ===== */
+  const lastPizza = session.pizzas.find(p => p.cilantro === null);
+  if (lastPizza && /yes|no/i.test(msg)) {
+    lastPizza.cilantro = /yes/i.test(msg) ? "Yes" : "No";
   }
 
-  /* ===== PHONE ===== */
-  if (!session.phone) {
-    const m = msg.match(/\b\d{10}\b/);
-    if (!m) return "Can I get a contact phone number?";
-    session.phone = m[0];
-  }
+  /* ===== ASK NEXT QUESTION ===== */
+  const next = nextQuestion(session);
 
-  /* ===== CONFIRM ===== */
-  if (!session.confirming) {
-    session.confirming = true;
-    return `Please confirm your order:
+  if (next === "confirm") {
+    if (!session.confirming) {
+      session.confirming = true;
+      return `Please confirm your order:
 
 PIZZAS:
-${session.items.map(
-      p => `${p.qty}× ${p.size} ${p.name} (${p.spice}) Cilantro: ${p.cilantro}`
-    ).join("\n")}
+${session.pizzas.map(
+        p => `${p.qty}× ${p.size} ${p.name} (${p.spice}) Cilantro: ${p.cilantro}`
+      ).join("\n")}
 
 SIDES:
 ${session.sides.length ? session.sides.join(", ") : "None"}
@@ -221,31 +223,33 @@ ${session.sides.length ? session.sides.join(", ") : "None"}
 ${session.orderType}
 
 Is that correct?`;
-  }
+    }
 
-  /* ===== FINAL ===== */
-  if (/yes|correct/i.test(msg)) {
-    const ticket = {
-      id: nextTicket(),
-      time: new Date().toLocaleTimeString(),
-      name: session.name,
-      phone: session.phone,
-      orderType: session.orderType,
-      pizzas: session.items,
-      sides: session.sides
-    };
+    if (/yes|correct/i.test(msg)) {
+      const ticket = {
+        id: nextTicket(),
+        time: new Date().toLocaleTimeString(),
+        name: session.name,
+        phone: session.phone,
+        orderType: session.orderType,
+        pizzas: session.pizzas,
+        sides: session.sides
+      };
 
-    tickets.unshift(ticket);
-    fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
-    sessions.delete(session.id);
+      tickets.unshift(ticket);
+      fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
+      sessions.delete(session.id);
 
-    return `✅ Order confirmed! Ticket #${ticket.id}
+      return `✅ Order confirmed! Ticket #${ticket.id}
 Your order will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
+    }
+
+    session.confirming = false;
+    return "No problem 🙂 What would you like to change?";
   }
 
-  session.confirming = false;
-  return "No problem 🙂 What would you like to change?";
+  return next;
 }
 
 /* =========================
@@ -260,8 +264,7 @@ app.post("/chat", async (req, res) => {
       id: sessionId,
       started: false,
       orderType: null,
-      pending: [],
-      items: [],
+      pizzas: [],
       sides: [],
       sidesAsked: false,
       name: null,
@@ -276,15 +279,7 @@ app.post("/chat", async (req, res) => {
 });
 
 /* =========================
-   TICKETS API
-========================= */
-
-app.get("/api/tickets", (req, res) => {
-  res.json(tickets);
-});
-
-/* =========================
-   HEALTH CHECK
+   HEALTH
 ========================= */
 
 app.get("/health", (req, res) => {
@@ -299,9 +294,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 AI assistant running on port", PORT);
 });
-;
-
-
 
 // vesion 1.2
 // import express from "express";
