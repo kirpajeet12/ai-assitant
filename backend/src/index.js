@@ -12,16 +12,29 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "../public"))); // ✅ FIX WHITE SCREEN
+
+/* =========================
+   DATA FILE
+========================= */
+
 const TICKETS_FILE = path.join(__dirname, "tickets.json");
-if (!fs.existsSync(TICKETS_FILE)) fs.writeFileSync(TICKETS_FILE, "[]");
+if (!fs.existsSync(TICKETS_FILE)) {
+  fs.writeFileSync(TICKETS_FILE, "[]");
+}
+
+let tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
+
+/* =========================
+   OPENAI (EXTRACTION ONLY)
+========================= */
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
-
-const app = express();
-app.use(cors());
-app.use(express.json());
 
 /* =========================
    MENU
@@ -45,11 +58,8 @@ const SIDES = [
 ];
 
 /* =========================
-   STORAGE
+   TICKET NUMBER
 ========================= */
-
-const sessions = new Map();
-let tickets = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
 
 let day = new Date().toDateString();
 let counter = 1;
@@ -64,18 +74,18 @@ function nextTicket() {
 }
 
 /* =========================
-   AI EXTRACTION (ONLY PARSING)
+   AI EXTRACTION (SAFE)
 ========================= */
 
 async function extract(message) {
   const prompt = `
-Extract order info from customer message.
-Return ONLY JSON.
+You extract order info for Pizza 64.
+Return ONLY valid JSON.
 
 Menu pizzas: ${MENU.join(", ")}
 Sides: ${SIDES.join(", ")}
 
-JSON:
+JSON format:
 {
   "orderType": "Pickup" | "Delivery" | null,
   "pizzas": [
@@ -99,11 +109,18 @@ Message:
       temperature: 0,
       messages: [{ role: "system", content: prompt }]
     });
+
     return JSON.parse(res.choices[0].message.content);
   } catch {
     return {};
   }
 }
+
+/* =========================
+   SESSION MEMORY
+========================= */
+
+const sessions = new Map();
 
 /* =========================
    CHAT ENGINE
@@ -127,7 +144,7 @@ async function reply(session, msg) {
     return "Is this for pickup or delivery?";
   }
 
-  /* ===== ADD PIZZAS ===== */
+  /* ===== ADD PIZZAS FROM AI ===== */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
       session.pending.push({
@@ -140,7 +157,7 @@ async function reply(session, msg) {
     }
   }
 
-  /* ===== HARD BLOCK: COMPLETE PIZZAS ===== */
+  /* ===== COMPLETE CURRENT PIZZA ===== */
   const incomplete = session.pending.find(
     p => !p.size || !p.spice || p.cilantro === null
   );
@@ -171,11 +188,13 @@ async function reply(session, msg) {
     session.sides.push(...ai.sides);
   }
 
-  /* ===== NAME ===== */
+  /* ===== NAME (FIXED) ===== */
   if (!session.name) {
-    return "May I have your name for the order?";
+    session.name = msg.trim();
+    return "Can I get a contact phone number?";
   }
 
+  /* ===== PHONE ===== */
   if (!session.phone) {
     const m = msg.match(/\b\d{10}\b/);
     if (!m) return "Can I get a contact phone number?";
@@ -221,7 +240,8 @@ Your order will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
   }
 
-  return "Okay 🙂 What would you like to change?";
+  session.confirming = false;
+  return "No problem 🙂 What would you like to change?";
 }
 
 /* =========================
@@ -260,6 +280,14 @@ app.get("/api/tickets", (req, res) => {
 });
 
 /* =========================
+   HEALTH CHECK
+========================= */
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", service: "Pizza 64 AI Assistant" });
+});
+
+/* =========================
    SERVER
 ========================= */
 
@@ -267,6 +295,7 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 AI assistant running on port", PORT);
 });
+;
 
 
 
