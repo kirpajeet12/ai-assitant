@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
-import path from "path";
 import fs from "fs";
+import path from "path";
 import OpenAI from "openai";
 import { fileURLToPath } from "url";
 
@@ -22,10 +22,9 @@ const openai = new OpenAI({
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "../public")));
 
 /* =========================
-   MENU DATA
+   MENU
 ========================= */
 
 const MENU = [
@@ -46,7 +45,7 @@ const SIDES = [
 ];
 
 /* =========================
-   MEMORY
+   STORAGE
 ========================= */
 
 const sessions = new Map();
@@ -65,29 +64,19 @@ function nextTicket() {
 }
 
 /* =========================
-   AI EXTRACTION
+   AI EXTRACTION (ONLY PARSING)
 ========================= */
 
 async function extract(message) {
   const prompt = `
-You are a Pizza 64 ordering assistant.
-
-Extract structured data from the message.
-Return ONLY valid JSON. No explanation.
-
-Rules:
-- Support multiple pizzas
-- Quantity defaults to 1
-- Use only menu items
-- Missing info = null
-- Do NOT invent data
+Extract order info from customer message.
+Return ONLY JSON.
 
 Menu pizzas: ${MENU.join(", ")}
 Sides: ${SIDES.join(", ")}
 
-JSON format:
+JSON:
 {
-  "intent": "order" | "other",
   "orderType": "Pickup" | "Delivery" | null,
   "pizzas": [
     {
@@ -100,7 +89,7 @@ JSON format:
   "sides": [string]
 }
 
-Customer message:
+Message:
 "${message}"
 `;
 
@@ -114,16 +103,6 @@ Customer message:
   } catch {
     return {};
   }
-}
-
-/* =========================
-   HELPERS
-========================= */
-
-function hasIncompletePizza(session) {
-  return session.pending.some(
-    p => !p.size || !p.spice || p.cilantro === null
-  );
 }
 
 /* =========================
@@ -148,7 +127,7 @@ async function reply(session, msg) {
     return "Is this for pickup or delivery?";
   }
 
-  /* ===== MERGE AI PIZZAS ===== */
+  /* ===== ADD PIZZAS ===== */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
       session.pending.push({
@@ -161,49 +140,40 @@ async function reply(session, msg) {
     }
   }
 
-  /* ===== HARD BLOCK: COMPLETE PIZZAS FIRST ===== */
-  if (session.pending.length > 0 && hasIncompletePizza(session)) {
-    const p = session.pending.find(
-      x => !x.size || !x.spice || x.cilantro === null
-    );
+  /* ===== HARD BLOCK: COMPLETE PIZZAS ===== */
+  const incomplete = session.pending.find(
+    p => !p.size || !p.spice || p.cilantro === null
+  );
 
-    if (!p.size)
-      return `What size would you like for the ${p.name}?`;
+  if (incomplete) {
+    if (!incomplete.size)
+      return `What size would you like for the ${incomplete.name}?`;
 
-    if (!p.spice)
-      return `How spicy should the ${p.name}? Mild, Medium, or Hot?`;
+    if (!incomplete.spice)
+      return `How spicy should the ${incomplete.name}? Mild, Medium, or Hot?`;
 
-    if (p.cilantro === null)
-      return `Would you like cilantro on the ${p.name}? Yes or No?`;
+    if (incomplete.cilantro === null)
+      return `Would you like cilantro on the ${incomplete.name}? Yes or No?`;
   }
 
-  /* ===== FINALIZE COMPLETED PIZZAS ===== */
+  /* ===== FINALIZE PIZZAS ===== */
   while (session.pending.length) {
-    const p = session.pending[0];
-    if (p.size && p.spice && p.cilantro !== null) {
-      session.items.push(p);
-      session.pending.shift();
-    } else break;
+    session.items.push(session.pending.shift());
   }
 
-  /* ===== SIDES (ONLY AFTER PIZZAS) ===== */
-  if (
-    session.pending.length === 0 &&
-    session.items.length > 0 &&
-    !session.sidesAsked
-  ) {
+  /* ===== SIDES ===== */
+  if (!session.sidesAsked) {
     session.sidesAsked = true;
     return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
   }
 
-  if (ai.sides?.length && session.sidesAsked) {
+  if (ai.sides?.length) {
     session.sides.push(...ai.sides);
   }
 
-  /* ===== CUSTOMER INFO ===== */
+  /* ===== NAME ===== */
   if (!session.name) {
-    session.name = msg.trim();
-    return "Can I get a contact phone number?";
+    return "May I have your name for the order?";
   }
 
   if (!session.phone) {
@@ -212,8 +182,8 @@ async function reply(session, msg) {
     session.phone = m[0];
   }
 
-  /* ===== CONFIRMATION ===== */
-  if (!session.confirming && session.items.length > 0) {
+  /* ===== CONFIRM ===== */
+  if (!session.confirming) {
     session.confirming = true;
     return `Please confirm your order:
 
@@ -251,8 +221,7 @@ Your order will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
   }
 
-  session.confirming = false;
-  return "No problem 🙂 What would you like to change?";
+  return "Okay 🙂 What would you like to change?";
 }
 
 /* =========================
@@ -278,8 +247,8 @@ app.post("/chat", async (req, res) => {
   }
 
   const session = sessions.get(sessionId);
-  const text = await reply(session, message);
-  res.json({ reply: text });
+  const response = await reply(session, message);
+  res.json({ reply: response });
 });
 
 /* =========================
@@ -298,6 +267,7 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 AI assistant running on port", PORT);
 });
+
 
 
 // vesion 1.2
