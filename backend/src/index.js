@@ -173,15 +173,20 @@ async function reply(session, msg) {
     } else break;
   }
 
-  /* ===== SIDES ===== */
-  if (!session.sidesAsked) {
-    session.sidesAsked = true;
-    return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
-  }
+/* ===== SIDES (ONLY AFTER ALL PIZZAS FINALIZED) ===== */
+if (
+  session.pending.length === 0 &&
+  session.items.length > 0 &&
+  !session.sidesAsked
+) {
+  session.sidesAsked = true;
+  return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
+}
 
-  if (ai.sides?.length) {
-    session.sides.push(...ai.sides);
-  }
+if (ai.sides?.length && session.sidesAsked) {
+  session.sides.push(...ai.sides);
+}
+
 
   /* ===== CUSTOMER INFO ===== */
   if (!session.name) {
