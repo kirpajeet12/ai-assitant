@@ -264,6 +264,7 @@ if (session.confirming && /yes|correct/i.test(msg)) {
 Your order will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
 }
+}
 
 /* =========================
    API
