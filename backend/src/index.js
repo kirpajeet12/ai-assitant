@@ -66,7 +66,7 @@ Rules:
 - Quantity defaults to 1
 - Missing fields must be null
 
-JSON format:
+JSON:
 {
   "orderType": "Pickup" | "Delivery" | null,
   "pizzas": [
@@ -103,16 +103,14 @@ Message:
 const sessions = new Map();
 
 /* =========================
-   FLOW DECISION
+   NEXT QUESTION LOGIC
 ========================= */
 
 function nextQuestion(session) {
-  // 1️⃣ NO PIZZA YET
   if (session.pizzas.length === 0) {
     return "Sure 🙂 What pizza would you like?";
   }
 
-  // 2️⃣ COMPLETE PIZZAS
   const p = session.pizzas.find(
     x => !x.size || !x.spice || x.cilantro === null
   );
@@ -125,23 +123,19 @@ function nextQuestion(session) {
       return `Would you like cilantro on the ${p.name}? Yes or No?`;
   }
 
-  // 3️⃣ PICKUP / DELIVERY
   if (!session.orderType) {
     return "Is this for pickup or delivery?";
   }
 
-  // 4️⃣ SIDES
   if (!session.sidesAsked) {
     session.sidesAsked = true;
     return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
   }
 
-  // 5️⃣ NAME
   if (!session.name) {
     return "May I have your name for the order?";
   }
 
-  // 6️⃣ PHONE
   if (!session.phone) {
     return "Can I get a contact phone number?";
   }
@@ -168,7 +162,7 @@ async function reply(session, msg) {
   /* ===== MERGE PIZZAS ===== */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
-      if (!p.name) continue; // 🚨 NEVER ADD NULL PIZZA
+      if (!p.name) continue;
 
       session.pizzas.push({
         name: p.name,
@@ -185,7 +179,7 @@ async function reply(session, msg) {
     session.sides.push(...ai.sides);
   }
 
-  /* ===== ANSWER MISSING PIZZA QUESTIONS ===== */
+  /* ===== FILL MISSING PIZZA INFO ===== */
   const active = session.pizzas.find(
     x => !x.size || !x.spice || x.cilantro === null
   );
@@ -194,15 +188,15 @@ async function reply(session, msg) {
     const t = msg.toLowerCase();
 
     if (!active.size && /small|medium|large/.test(t)) {
-      active.size = t.match(/small|medium|large/i)[0]
-        .charAt(0)
-        .toUpperCase() + t.match(/small|medium|large/i)[0].slice(1);
+      active.size =
+        t.match(/small|medium|large/i)[0][0].toUpperCase() +
+        t.match(/small|medium|large/i)[0].slice(1);
     }
 
     if (!active.spice && /mild|medium|hot/.test(t)) {
-      active.spice = t.match(/mild|medium|hot/i)[0]
-        .charAt(0)
-        .toUpperCase() + t.match(/mild|medium|hot/i)[0].slice(1);
+      active.spice =
+        t.match(/mild|medium|hot/i)[0][0].toUpperCase() +
+        t.match(/mild|medium|hot/i)[0].slice(1);
     }
 
     if (active.cilantro === null && /yes|no/.test(t)) {
@@ -220,10 +214,10 @@ async function reply(session, msg) {
     if (m) session.phone = m[0];
   }
 
-  /* ===== CONFIRM ===== */
+  /* ===== CONFIRMATION ===== */
   const next = nextQuestion(session);
 
-  if (next === "confirm") {
+  if (next === "confirm" && !session.confirming) {
     session.confirming = true;
     return `Please confirm your order:
 
@@ -240,30 +234,31 @@ ${session.orderType}
 Is that correct?`;
   }
 
- /* ===== FINAL YES ===== */
-if (session.confirming && /yes|correct/i.test(msg)) {
-  session.confirming = false;        // 🔒 stop re-entry
-  session.completed = true;          // 🔒 hard lock
+  /* ===== FINAL YES (ONCE ONLY) ===== */
+  if (session.confirming && /yes|correct/i.test(msg)) {
+    session.confirming = false;
 
-  const ticket = {
-    id: `P64-${Date.now()}`,
-    time: new Date().toLocaleTimeString(),
-    name: session.name,
-    phone: session.phone,
-    orderType: session.orderType,
-    pizzas: session.pizzas,
-    sides: session.sides
-  };
+    const ticket = {
+      id: `P64-${Date.now()}`,
+      time: new Date().toLocaleTimeString(),
+      name: session.name,
+      phone: session.phone,
+      orderType: session.orderType,
+      pizzas: session.pizzas,
+      sides: session.sides
+    };
 
-  tickets.unshift(ticket);
-  fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
+    tickets.unshift(ticket);
+    fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
+    sessions.delete(session.id);
 
-  sessions.delete(session.id);        // ✅ DESTROY SESSION
-
-  return `✅ Order confirmed! Ticket #${ticket.id}
+    return `✅ Order confirmed! Ticket #${ticket.id}
 Your order will be ready in 20–25 minutes.
 Thank you for ordering Pizza 64 🍕`;
-}
+  }
+
+  /* ===== ABSOLUTE SAFETY NET ===== */
+  return nextQuestion(session);
 }
 
 /* =========================
@@ -293,7 +288,7 @@ app.post("/chat", async (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", service: "Pizza 64 AI Assistant" });
+  res.json({ status: "ok" });
 });
 
 app.get("/api/tickets", (req, res) => {
