@@ -70,16 +70,16 @@ function nextTicket() {
 
 async function extract(message) {
   const prompt = `
-You work at Pizza 64.
+You are a Pizza 64 ordering assistant.
 
-Extract structured information from the customer message.
-Return ONLY valid JSON.
+Extract structured data from the message.
+Return ONLY valid JSON. No explanation.
 
 Rules:
-- Support multiple pizzas in one message
+- Support multiple pizzas
 - Quantity defaults to 1
-- Only use items from the menu
-- If info is missing, use null
+- Use only menu items
+- Missing info = null
 - Do NOT invent data
 
 Menu pizzas: ${MENU.join(", ")}
@@ -87,7 +87,7 @@ Sides: ${SIDES.join(", ")}
 
 JSON format:
 {
-  "intent": "order | other",
+  "intent": "order" | "other",
   "orderType": "Pickup" | "Delivery" | null,
   "pizzas": [
     {
@@ -97,8 +97,7 @@ JSON format:
       "qty": number
     }
   ],
-  "sides": [string],
-  "done": boolean
+  "sides": [string]
 }
 
 Customer message:
@@ -115,6 +114,16 @@ Customer message:
   } catch {
     return {};
   }
+}
+
+/* =========================
+   HELPERS
+========================= */
+
+function hasIncompletePizza(session) {
+  return session.pending.some(
+    p => !p.size || !p.spice || p.cilantro === null
+  );
 }
 
 /* =========================
@@ -139,7 +148,7 @@ async function reply(session, msg) {
     return "Is this for pickup or delivery?";
   }
 
-  /* ===== MERGE PIZZAS ===== */
+  /* ===== MERGE AI PIZZAS ===== */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
       session.pending.push({
@@ -152,19 +161,23 @@ async function reply(session, msg) {
     }
   }
 
-  /* ===== COMPLETE PIZZAS ===== */
-  const next = session.pending.find(
-    p => !p.size || !p.spice || p.cilantro === null
-  );
+  /* ===== HARD BLOCK: COMPLETE PIZZAS FIRST ===== */
+  if (session.pending.length > 0 && hasIncompletePizza(session)) {
+    const p = session.pending.find(
+      x => !x.size || !x.spice || x.cilantro === null
+    );
 
-  if (next) {
-    if (!next.size) return `What size would you like for the ${next.name}?`;
-    if (!next.spice)
-      return `How spicy should the ${next.name} be? Mild, Medium, or Hot?`;
-    if (next.cilantro === null)
-      return `Would you like cilantro on the ${next.name}? Yes or No?`;
+    if (!p.size)
+      return `What size would you like for the ${p.name}?`;
+
+    if (!p.spice)
+      return `How spicy should the ${p.name}? Mild, Medium, or Hot?`;
+
+    if (p.cilantro === null)
+      return `Would you like cilantro on the ${p.name}? Yes or No?`;
   }
 
+  /* ===== FINALIZE COMPLETED PIZZAS ===== */
   while (session.pending.length) {
     const p = session.pending[0];
     if (p.size && p.spice && p.cilantro !== null) {
@@ -173,20 +186,19 @@ async function reply(session, msg) {
     } else break;
   }
 
-/* ===== SIDES (ONLY AFTER ALL PIZZAS FINALIZED) ===== */
-if (
-  session.pending.length === 0 &&
-  session.items.length > 0 &&
-  !session.sidesAsked
-) {
-  session.sidesAsked = true;
-  return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
-}
+  /* ===== SIDES (ONLY AFTER PIZZAS) ===== */
+  if (
+    session.pending.length === 0 &&
+    session.items.length > 0 &&
+    !session.sidesAsked
+  ) {
+    session.sidesAsked = true;
+    return `Would you like any sides or drinks? We have ${SIDES.join(", ")}.`;
+  }
 
-if (ai.sides?.length && session.sidesAsked) {
-  session.sides.push(...ai.sides);
-}
-
+  if (ai.sides?.length && session.sidesAsked) {
+    session.sides.push(...ai.sides);
+  }
 
   /* ===== CUSTOMER INFO ===== */
   if (!session.name) {
@@ -201,7 +213,7 @@ if (ai.sides?.length && session.sidesAsked) {
   }
 
   /* ===== CONFIRMATION ===== */
-  if (!session.confirming) {
+  if (!session.confirming && session.items.length > 0) {
     session.confirming = true;
     return `Please confirm your order:
 
@@ -286,7 +298,6 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 AI assistant running on port", PORT);
 });
-
 
 
 // vesion 1.2
