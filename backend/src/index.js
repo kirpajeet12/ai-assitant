@@ -68,7 +68,7 @@ Menu pizzas: ${MENU.join(", ")}
 Sides: ${SIDES.join(", ")}
 
 {
-  "intent": "order | menu | suggest | other",
+  "intent": "order | menu | other",
   "orderType": "Pickup" | "Delivery" | null,
   "address": string | null,
   "pizzas": [
@@ -92,7 +92,6 @@ Message:
       temperature: 0,
       messages: [{ role: "system", content: prompt }]
     });
-
     return JSON.parse(res.choices[0].message.content);
   } catch {
     return {};
@@ -100,12 +99,12 @@ Message:
 }
 
 /* =========================
-   NEXT QUESTION (LOCKED)
+   NEXT QUESTION (SAFE)
 ========================= */
 
 function nextQuestion(session) {
 
-  // 🔒 Lock incomplete pizza
+  // 🔒 Lock onto first incomplete pizza
   if (session.activePizzaIndex === null) {
     session.activePizzaIndex = session.pizzas.findIndex(
       p => !p.size || !p.spice
@@ -113,7 +112,8 @@ function nextQuestion(session) {
   }
 
   const p =
-    session.activePizzaIndex !== null && session.activePizzaIndex !== -1
+    session.activePizzaIndex !== null &&
+    session.activePizzaIndex !== -1
       ? session.pizzas[session.activePizzaIndex]
       : null;
 
@@ -123,15 +123,20 @@ function nextQuestion(session) {
       return `How spicy would you like the ${p.name}? Mild, Medium, or Hot?`;
   }
 
-  // All pizzas done
+  // All pizzas complete
   session.activePizzaIndex = null;
 
-  if (!session.morePizzaAsked) {
+  // ✅ Ask “another pizza” ONLY if at least one pizza exists
+  if (
+    session.pizzas.length > 0 &&
+    session.pizzas.every(p => p.size && p.spice) &&
+    !session.morePizzaAsked
+  ) {
     session.morePizzaAsked = true;
     return "Would you like to add another pizza or is that all?";
   }
 
-  if (!session.sidesAsked) {
+  if (!session.sidesAsked && session.pizzas.length > 0) {
     session.sidesAsked = true;
     return "Would you like any sides or drinks?";
   }
@@ -158,6 +163,14 @@ async function reply(session, msg) {
   /* ===== MENU ===== */
   if (ai.intent === "menu") {
     return "Our most popular pizzas are Pepperoni, Butter Chicken, Shahi Paneer, Veggie Supreme, and Tandoori Chicken.";
+  }
+
+  /* ===== USER WANTS TO ORDER BUT NO PIZZA YET ===== */
+  if (
+    session.pizzas.length === 0 &&
+    /order|want.*pizza|buy.*pizza/i.test(msg)
+  ) {
+    return "Sure 😊 What pizza would you like to order?";
   }
 
   /* ===== ORDER TYPE ===== */
@@ -210,7 +223,7 @@ async function reply(session, msg) {
   /* ===== SIDES ===== */
   if (ai.sides?.length) session.sides.push(...ai.sides);
 
-  /* ===== CONFIRMATION ===== */
+  /* ===== CONFIRM ===== */
   const next = nextQuestion(session);
 
   if (next === "confirm" && !session.confirming) {
@@ -219,9 +232,7 @@ async function reply(session, msg) {
     return `Please confirm your order:
 
 ${session.pizzas
-  .map(
-    p => `${p.qty}× ${p.size} ${p.name} (${p.spice})`
-  )
+  .map(p => `${p.qty}× ${p.size} ${p.name} (${p.spice})`)
   .join("\n")}
 
 Sides: ${session.sides.length ? session.sides.join(", ") : "None"}
@@ -316,18 +327,13 @@ app.post("/twilio/step", async (req, res) => {
 });
 
 /* =========================
-   TICKETS API
-========================= */
-
-app.get("/api/tickets", (req, res) => res.json(tickets));
-
-/* =========================
    SERVER
 ========================= */
 
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 AI running on port", PORT);
 });
+
 
 
 // version 55 
