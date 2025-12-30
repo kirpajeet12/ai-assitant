@@ -56,21 +56,27 @@ const openai = new OpenAI({
 });
 
 /* =========================
-   AI EXTRACTION
+   AI EXTRACTION (ORDER + EDIT)
 ========================= */
 
 async function extract(message) {
   const prompt = `
-Extract pizza order info.
+Extract intent from user message.
 Return ONLY JSON.
 
 Menu pizzas: ${MENU.join(", ")}
-Sides: ${SIDES.join(", ")}
 
 {
-  "intent": "order | menu | other",
-  "orderType": "Pickup" | "Delivery" | null,
-  "address": string | null,
+  "intent": "order | edit | remove | menu | confirm | other",
+  "edit": {
+    "index": number | null,
+    "field": "size | spice" | null,
+    "value": string | null
+  },
+  "remove": {
+    "name": string | null,
+    "index": number | null
+  },
   "pizzas": [
     {
       "name": string | null,
@@ -78,8 +84,7 @@ Sides: ${SIDES.join(", ")}
       "spice": "Mild" | "Medium" | "Hot" | null,
       "qty": number
     }
-  ],
-  "sides": [string]
+  ]
 }
 
 Message:
@@ -87,24 +92,23 @@ Message:
 `;
 
   try {
-    const res = await openai.chat.completions.create({
+    const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
       messages: [{ role: "system", content: prompt }]
     });
-    return JSON.parse(res.choices[0].message.content);
+    return JSON.parse(r.choices[0].message.content);
   } catch {
     return {};
   }
 }
 
 /* =========================
-   NEXT QUESTION (SAFE)
+   NEXT QUESTION LOGIC
 ========================= */
 
 function nextQuestion(session) {
 
-  // 🔒 Lock onto first incomplete pizza
   if (session.activePizzaIndex === null) {
     session.activePizzaIndex = session.pizzas.findIndex(
       p => !p.size || !p.spice
@@ -123,10 +127,8 @@ function nextQuestion(session) {
       return `How spicy would you like the ${p.name}? Mild, Medium, or Hot?`;
   }
 
-  // All pizzas complete
   session.activePizzaIndex = null;
 
-  // ✅ Ask “another pizza” ONLY if at least one pizza exists
   if (
     session.pizzas.length > 0 &&
     session.pizzas.every(p => p.size && p.spice) &&
@@ -165,25 +167,35 @@ async function reply(session, msg) {
     return "Our most popular pizzas are Pepperoni, Butter Chicken, Shahi Paneer, Veggie Supreme, and Tandoori Chicken.";
   }
 
-  /* ===== USER WANTS TO ORDER BUT NO PIZZA YET ===== */
-  if (
-    session.pizzas.length === 0 &&
-    /order|want.*pizza|buy.*pizza/i.test(msg)
-  ) {
-    return "Sure 😊 What pizza would you like to order?";
-  }
-
-  /* ===== ORDER TYPE ===== */
-  if (ai.orderType) session.orderType = ai.orderType;
-
-  if (session.orderType === "Delivery" && !session.address) {
-    if (!ai.address && !/\d/.test(msg)) {
-      return "Can I get the delivery address?";
+  /* ===== REMOVE PIZZA ===== */
+  if (ai.intent === "remove") {
+    if (ai.remove?.index !== null && session.pizzas[ai.remove.index]) {
+      session.pizzas.splice(ai.remove.index, 1);
+      return "Got it 👍 I’ve removed that pizza.";
     }
-    session.address = msg.trim();
+
+    if (ai.remove?.name) {
+      const i = session.pizzas.findIndex(p =>
+        p.name.toLowerCase().includes(ai.remove.name.toLowerCase())
+      );
+      if (i !== -1) {
+        session.pizzas.splice(i, 1);
+        return "No problem 👍 I’ve removed that pizza.";
+      }
+    }
   }
 
-  /* ===== MERGE PIZZAS ===== */
+  /* ===== EDIT PIZZA ===== */
+  if (ai.intent === "edit" && ai.edit?.index !== null) {
+    const p = session.pizzas[ai.edit.index];
+    if (p && ai.edit.field && ai.edit.value) {
+      p[ai.edit.field] =
+        ai.edit.value[0].toUpperCase() + ai.edit.value.slice(1);
+      return `Done 👍 I’ve updated the ${p.name}.`;
+    }
+  }
+
+  /* ===== MERGE NEW PIZZAS ===== */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
       if (!p.name) continue;
@@ -196,7 +208,7 @@ async function reply(session, msg) {
     }
   }
 
-  /* ===== APPLY SIZE/SPICE TO ACTIVE PIZZA ===== */
+  /* ===== APPLY SIZE/SPICE TO ACTIVE ===== */
   const active =
     session.activePizzaIndex !== null
       ? session.pizzas[session.activePizzaIndex]
@@ -204,24 +216,18 @@ async function reply(session, msg) {
 
   if (active) {
     const t = msg.toLowerCase();
-
     if (!active.size && /small|medium|large/.test(t)) {
-      const s = t.match(/small|medium|large/)[0];
-      active.size = s[0].toUpperCase() + s.slice(1);
+      active.size =
+        t.match(/small|medium|large/)[0][0].toUpperCase() +
+        t.match(/small|medium|large/)[0].slice(1);
     }
-
     if (!active.spice && /mild|medium|hot/.test(t)) {
-      const s = t.match(/mild|medium|hot/)[0];
-      active.spice = s[0].toUpperCase() + s.slice(1);
+      active.spice =
+        t.match(/mild|medium|hot/)[0][0].toUpperCase() +
+        t.match(/mild|medium|hot/)[0].slice(1);
     }
-
-    if (active.size && active.spice) {
-      session.activePizzaIndex = null;
-    }
+    if (active.size && active.spice) session.activePizzaIndex = null;
   }
-
-  /* ===== SIDES ===== */
-  if (ai.sides?.length) session.sides.push(...ai.sides);
 
   /* ===== CONFIRM ===== */
   const next = nextQuestion(session);
@@ -229,30 +235,26 @@ async function reply(session, msg) {
   if (next === "confirm" && !session.confirming) {
     session.confirming = true;
 
-    return `Please confirm your order:
-
-${session.pizzas
-  .map(p => `${p.qty}× ${p.size} ${p.name} (${p.spice})`)
-  .join("\n")}
-
-Sides: ${session.sides.length ? session.sides.join(", ") : "None"}
-${session.orderType || "Pickup"}
-
-Is that correct?`;
+    return `Please confirm your order:\n\n${session.pizzas
+      .map(
+        (p, i) =>
+          `${i + 1}. ${p.qty}× ${p.size} ${p.name} (${p.spice})`
+      )
+      .join("\n")}\n\nIs that correct?`;
   }
 
   if (session.confirming && /yes|correct/i.test(msg)) {
     const ticket = {
       id: `P64-${Date.now()}`,
       time: new Date().toLocaleTimeString(),
-      ...session
+      pizzas: session.pizzas
     };
 
     tickets.unshift(ticket);
     fs.writeFileSync(TICKETS_FILE, JSON.stringify(tickets, null, 2));
     sessions.delete(session.id);
 
-    return "✅ Order confirmed! Your order will be ready in 20–25 minutes. Thank you for ordering Pizza 64 🍕";
+    return "✅ Order confirmed! Your pizza will be ready in 20–25 minutes. Thank you for ordering Pizza 64 🍕";
   }
 
   return next;
@@ -271,10 +273,6 @@ app.post("/chat", async (req, res) => {
       started: false,
       pizzas: [],
       sides: [],
-      orderType: null,
-      address: null,
-      name: null,
-      phone: null,
       confirming: false,
       morePizzaAsked: false,
       sidesAsked: false,
@@ -288,12 +286,14 @@ app.post("/chat", async (req, res) => {
 });
 
 /* =========================
-   TWILIO VOICE
+   TWILIO VOICE (PAUSED)
 ========================= */
 
 app.post("/twilio/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say("Welcome to Pizza 64. What can I get for you?");
+  twiml.say("Welcome to Pizza 64.");
+  twiml.pause({ length: 1 });
+  twiml.say("What can I get for you today?");
   twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
   res.type("text/xml").send(twiml.toString());
 });
@@ -307,9 +307,6 @@ app.post("/twilio/step", async (req, res) => {
       id: callSid,
       started: false,
       pizzas: [],
-      sides: [],
-      orderType: null,
-      address: null,
       confirming: false,
       morePizzaAsked: false,
       sidesAsked: false,
@@ -322,6 +319,7 @@ app.post("/twilio/step", async (req, res) => {
 
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.say(replyText);
+  twiml.pause({ length: 1 });
   twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
   res.type("text/xml").send(twiml.toString());
 });
@@ -333,6 +331,7 @@ app.post("/twilio/step", async (req, res) => {
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 AI running on port", PORT);
 });
+
 
 
 
