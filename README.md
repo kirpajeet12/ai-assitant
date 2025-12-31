@@ -27,6 +27,6 @@ Env Vars:
 Twilio Console -> Phone Numbers -> your number -> Voice & Fax:
 - A CALL COMES IN:
   - Webhook: POST
-  - URL: https://YOUR-RENDER-URL.onrender.com/twilio/voice
+  - URL: https://ai-assitant-n7ly.onrender.com/chat.html
 
 Call your Twilio number and speak an order.
