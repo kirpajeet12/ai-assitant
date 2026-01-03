@@ -334,18 +334,24 @@ app.post("/chat", async (req, res) => {
    TWILIO VOICE
 ========================= */
 
-app.post("/twilio/voice", (req, res) => {
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say("Welcome to Pizza 64.");
-  twiml.pause({ length: 1 });
-  twiml.say("What can I get for you today?");
-  twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
-  res.type("text/xml").send(twiml.toString());
-});
-
 app.post("/twilio/step", async (req, res) => {
   const callSid = req.body.CallSid;
   const speech = req.body.SpeechResult || "";
+
+  // ✅ ADD THIS BLOCK HERE
+  if (!speech) {
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say("Sorry, I didn't catch that. Please say your order again.");
+    twiml.pause({ length: 1 });
+    twiml.gather({
+      input: "speech",
+      language: "en-CA",
+      action: "/twilio/step",
+      method: "POST"
+    });
+    return res.type("text/xml").send(twiml.toString());
+  }
+  // ✅ END ADD
 
   if (!sessions.has(callSid)) {
     sessions.set(callSid, {
@@ -371,9 +377,16 @@ app.post("/twilio/step", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.say(replyText);
   twiml.pause({ length: 1 });
-  twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+  twiml.gather({
+    input: "speech",
+    language: "en-CA",
+    action: "/twilio/step",
+    method: "POST"
+  });
+
   res.type("text/xml").send(twiml.toString());
 });
+
 
 /* =========================
    SERVER
