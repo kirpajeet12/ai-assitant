@@ -331,6 +331,39 @@ app.post("/chat", async (req, res) => {
 });
 
 /* =========================
+   TWILIO ENTRY POINT (REQUIRED)
+========================= */
+
+app.post("/twilio/voice", (req, res) => {
+  try {
+    const twiml = new twilio.twiml.VoiceResponse();
+
+    twiml.say(
+      { voice: "alice", language: "en-CA" },
+      "Welcome to Pizza 64."
+    );
+
+    twiml.pause({ length: 1 });
+
+    twiml.say("What can I get for you today?");
+
+    twiml.gather({
+      input: "speech",
+      language: "en-CA",
+      action: "/twilio/step",
+      method: "POST",
+      timeout: 5
+    });
+
+    res.type("text/xml").send(twiml.toString());
+  } catch (err) {
+    console.error("❌ /twilio/voice error:", err);
+    res.status(500).send("Twilio voice error");
+  }
+});
+
+
+/* =========================
    TWILIO VOICE
 ========================= */
 
