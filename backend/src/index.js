@@ -1,3 +1,4 @@
+
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -7,9 +8,9 @@ import OpenAI from "openai";
 import twilio from "twilio";
 import { fileURLToPath } from "url";
 
-/* =====================================================
+/* =========================
    BASIC SETUP
-===================================================== */
+========================= */
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,9 +22,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-/* =====================================================
+/* =========================
    MENU / PRICES
-===================================================== */
+========================= */
 
 const MENU = [
   "Cheese Lovers",
@@ -32,6 +33,14 @@ const MENU = [
   "Butter Chicken",
   "Shahi Paneer",
   "Tandoori Chicken"
+];
+
+const SIDES = [
+  "Garlic Bread",
+  "Fries",
+  "Coke",
+  "Sprite",
+  "Ranch"
 ];
 
 const PRICE_TABLE = {
@@ -61,37 +70,42 @@ const PRICE_TABLE = {
   }
 };
 
-const SIDES = ["Garlic Bread", "Chicken Wings", "Fries", "Coke", "Sprite"];
-
-/* =====================================================
+/* =========================
    STORAGE
-===================================================== */
+========================= */
 
 const TICKETS_FILE = path.join(__dirname, "tickets.json");
 if (!fs.existsSync(TICKETS_FILE)) fs.writeFileSync(TICKETS_FILE, "[]");
 
 const sessions = new Map();
 
-/* =====================================================
+/* =========================
    OPENAI
-===================================================== */
+========================= */
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-/* =====================================================
+/* =========================
    AI EXTRACTION
-===================================================== */
+========================= */
 
 async function extract(message) {
   const prompt = `
 You are a pizza order extractor.
 
-Menu pizzas: ${MENU.join(", ")}
-Sides: ${SIDES.join(", ")}
+Menu pizzas (allow spelling mistakes):
+Cheese Lovers,
+Pepperoni,
+Veggie or Veggie Supreme,
+Butter Chicken,
+Shahi Paneer (may sound like shai, shy, paneer),
+Tandoori Chicken
 
-Return ONLY valid JSON.
+Normalize to closest menu item.
+
+Return ONLY JSON:
 
 {
   "intent": "order | menu | availability | price | total | other",
@@ -124,116 +138,119 @@ Message:
   }
 }
 
-/* =====================================================
+/* =========================
    HELPERS
-===================================================== */
+========================= */
 
-function voice(text) {
-  return text.replace(/\n+/g, ". ").replace(/\s{2,}/g, " ").trim();
+function normalizeSpice(text) {
+  if (!text) return null;
+  if (/hot|spicy/i.test(text)) return "Hot";
+  if (/medium|normal/i.test(text)) return "Medium";
+  if (/mild|light/i.test(text)) return "Mild";
+  return null;
 }
 
 function calcTotal(session) {
   let total = 0;
   for (const p of session.pizzas) {
-    if (p.size && p.name) {
-      total += PRICE_TABLE[p.size]?.[p.name] || 0;
-    }
+    total += PRICE_TABLE[p.size]?.[p.name] || 0;
+  }
+  if (session.sides.length) {
+    total += session.sides.length * 1.5; // flat side price
   }
   return total.toFixed(2);
 }
 
 function readOrder(session) {
   return session.pizzas
-    .map(p => {
-      if (p.half) {
-        return `one ${p.size} half and half pizza`;
-      }
-      return `${p.qty} ${p.size} ${p.name}, ${p.spice} spice` +
-        (p.pieces ? `, cut into ${p.pieces} pieces` : "");
-    })
+    .map(p =>
+      `${p.qty} ${p.size} ${p.name}, ${p.spice} spice` +
+      (p.pieces ? `, cut into ${p.pieces} pieces` : "")
+    )
     .join(", ");
 }
 
-/* =====================================================
+/* =========================
    CORE BRAIN
-===================================================== */
+========================= */
 
 async function reply(session, speech) {
   const clean = speech.trim();
   const lower = clean.toLowerCase();
   const ai = await extract(clean);
 
-  /* ---------- MENU ---------- */
+  /* ---- MENU ---- */
   if (ai.intent === "menu") {
     return `We have ${MENU.join(", ")}. What would you like to order?`;
   }
 
-  /* ---------- AVAILABILITY ---------- */
-  if (ai.intent === "availability" && ai.pizzas?.length) {
-    const name = ai.pizzas[0].name;
-    return MENU.includes(name)
-      ? `Yes, ${name} is available.`
-      : `Sorry, we do not have ${name}.`;
-  }
-
-  /* ---------- PRICE / TOTAL ---------- */
-  if ((ai.intent === "price" || ai.intent === "total") && session.pizzas.length) {
-    return `Your total is ${calcTotal(session)} dollars.`;
-  }
-
-  /* ---------- DELIVERY ANYTIME ---------- */
-  if (ai.orderType === "Delivery") {
+  /* ---- DELIVERY ANYTIME ---- */
+  if (/delivery/i.test(lower)) {
     session.orderType = "Delivery";
   }
 
-  /* ---------- ADD PIZZAS ---------- */
+  /* ---- ADD PIZZAS ---- */
   if (ai.pizzas?.length) {
     for (const p of ai.pizzas) {
       session.pizzas.push({
         name: p.name,
         size: p.size,
-        spice: p.spice,
+        spice: normalizeSpice(p.spice),
         qty: p.qty || 1,
-        pieces: p.pieces || null,
-        half: p.half || false
+        pieces: p.pieces || null
       });
     }
 
-    session.awaitingConfirmation = true;
+    session.awaitingConfirm = true;
     return `Just to confirm, you want ${readOrder(session)}. Is that correct?`;
   }
 
-  /* ---------- CONFIRM YES ---------- */
-  if (session.awaitingConfirmation && /yes|correct/i.test(lower)) {
-    session.awaitingConfirmation = false;
+  /* ---- CONFIRM YES ---- */
+  if (session.awaitingConfirm && /yes|correct/i.test(lower)) {
+    session.awaitingConfirm = false;
 
     if (session.orderType === "Delivery" && !session.address) {
       session.expectingAddress = true;
       return "Please tell me the delivery address.";
     }
 
+    if (!session.sidesAsked) {
+      session.sidesAsked = true;
+      return `Do you need any sides? We have ${SIDES.join(", ")}.`;
+    }
+
     return finalize(session);
   }
 
-  /* ---------- CONFIRM NO ---------- */
-  if (session.awaitingConfirmation && /no/i.test(lower)) {
-    session.awaitingConfirmation = false;
+  /* ---- CONFIRM NO ---- */
+  if (session.awaitingConfirm && /no/i.test(lower)) {
+    session.awaitingConfirm = false;
     return "No problem. What would you like to change?";
   }
 
-  /* ---------- ADDRESS ---------- */
+  /* ---- ADDRESS ---- */
   if (session.expectingAddress && clean.length > 5) {
     session.address = clean;
     session.expectingAddress = false;
+    return `Got it. ${session.address}. Do you need any sides? We have ${SIDES.join(", ")}.`;
+  }
+
+  /* ---- SIDES ---- */
+  if (session.sidesAsked && !session.sides.length) {
+    SIDES.forEach(s => {
+      if (lower.includes(s.toLowerCase())) {
+        session.sides.push(s);
+      }
+    });
     return finalize(session);
   }
 
-  return "Sorry, I didn’t quite understand that. Could you repeat your order?";
+  return "Sorry, I didn’t quite understand that. Please repeat.";
 }
 
-/* =====================================================
-   FINALIZE ORDER
-===================================================== */
+/* =========================
+   FINALIZE + TICKET
+========================= */
 
 function finalize(session) {
   const total = calcTotal(session);
@@ -245,6 +262,7 @@ function finalize(session) {
     orderType: session.orderType || "Pickup",
     address: session.address || null,
     pizzas: session.pizzas,
+    sides: session.sides,
     total
   };
 
@@ -252,26 +270,19 @@ function finalize(session) {
   existing.unshift(ticket);
   fs.writeFileSync(TICKETS_FILE, JSON.stringify(existing, null, 2));
 
-  return `Your order is confirmed. ${readOrder(session)}. 
-${session.orderType === "Delivery"
-    ? `Delivery to ${session.address}.`
-    : "Pickup order."}
+  return `Your order is confirmed. ${readOrder(session)}.
+${session.orderType === "Delivery" ? `Delivery to ${session.address}.` : "Pickup order."}
 Your total is ${total} dollars. Thank you for calling Pizza 64.`;
 }
 
-/* =====================================================
-   TWILIO ENTRY
-===================================================== */
+/* =========================
+   TWILIO ROUTES
+========================= */
 
 app.post("/twilio/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.say("Welcome to Pizza 64. What can I get for you today?");
-  twiml.gather({
-    input: "speech",
-    action: "/twilio/step",
-    method: "POST",
-    timeout: 5
-  });
+  twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
   res.type("text/xml").send(twiml.toString());
 });
 
@@ -283,10 +294,12 @@ app.post("/twilio/step", async (req, res) => {
     sessions.set(callSid, {
       phone: req.body.From,
       pizzas: [],
-      orderType: "Pickup",
+      sides: [],
+      orderType: null,
       address: null,
-      awaitingConfirmation: false,
-      expectingAddress: false
+      awaitingConfirm: false,
+      expectingAddress: false,
+      sidesAsked: false
     });
   }
 
@@ -302,28 +315,356 @@ app.post("/twilio/step", async (req, res) => {
   const response = await reply(session, speech);
 
   const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say(voice(response));
+  twiml.say(response);
   twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
 
   res.type("text/xml").send(twiml.toString());
 });
 
-/* =====================================================
+/* =========================
    TICKETS API
-===================================================== */
+========================= */
 
 app.get("/api/tickets", (req, res) => {
-  const data = fs.readFileSync(TICKETS_FILE, "utf8");
-  res.json(JSON.parse(data));
+  res.json(JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8")));
 });
 
-/* =====================================================
+/* =========================
    SERVER
-===================================================== */
+========================= */
 
 app.listen(PORT, () => {
   console.log("🍕 Pizza 64 Voice AI running on port", PORT);
 });
+
+//7.8 phone caal version
+
+// import "dotenv/config";
+// import express from "express";
+// import cors from "cors";
+// import fs from "fs";
+// import path from "path";
+// import OpenAI from "openai";
+// import twilio from "twilio";
+// import { fileURLToPath } from "url";
+
+// /* =====================================================
+//    BASIC SETUP
+// ===================================================== */
+
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+
+// const app = express();
+// app.use(cors());
+// app.use(express.urlencoded({ extended: false }));
+// app.use(express.json());
+
+// const PORT = process.env.PORT || 10000;
+
+// /* =====================================================
+//    MENU / PRICES
+// ===================================================== */
+
+// const MENU = [
+//   "Cheese Lovers",
+//   "Pepperoni",
+//   "Veggie Supreme",
+//   "Butter Chicken",
+//   "Shahi Paneer",
+//   "Tandoori Chicken"
+// ];
+
+// const PRICE_TABLE = {
+//   Small: {
+//     "Cheese Lovers": 10.99,
+//     "Pepperoni": 11.99,
+//     "Veggie Supreme": 11.99,
+//     "Butter Chicken": 12.99,
+//     "Shahi Paneer": 12.99,
+//     "Tandoori Chicken": 13.99
+//   },
+//   Medium: {
+//     "Cheese Lovers": 12.99,
+//     "Pepperoni": 13.99,
+//     "Veggie Supreme": 13.99,
+//     "Butter Chicken": 14.99,
+//     "Shahi Paneer": 14.99,
+//     "Tandoori Chicken": 15.99
+//   },
+//   Large: {
+//     "Cheese Lovers": 15.99,
+//     "Pepperoni": 16.99,
+//     "Veggie Supreme": 16.99,
+//     "Butter Chicken": 17.99,
+//     "Shahi Paneer": 17.99,
+//     "Tandoori Chicken": 18.99
+//   }
+// };
+
+// const SIDES = ["Garlic Bread", "Chicken Wings", "Fries", "Coke", "Sprite"];
+
+// /* =====================================================
+//    STORAGE
+// ===================================================== */
+
+// const TICKETS_FILE = path.join(__dirname, "tickets.json");
+// if (!fs.existsSync(TICKETS_FILE)) fs.writeFileSync(TICKETS_FILE, "[]");
+
+// const sessions = new Map();
+
+// /* =====================================================
+//    OPENAI
+// ===================================================== */
+
+// const openai = new OpenAI({
+//   apiKey: process.env.OPENAI_API_KEY
+// });
+
+// /* =====================================================
+//    AI EXTRACTION
+// ===================================================== */
+
+// async function extract(message) {
+//   const prompt = `
+// You are a pizza order extractor.
+
+// Menu pizzas: ${MENU.join(", ")}
+// Sides: ${SIDES.join(", ")}
+
+// Return ONLY valid JSON.
+
+// {
+//   "intent": "order | menu | availability | price | total | other",
+//   "orderType": "Pickup" | "Delivery" | null,
+//   "pizzas": [
+//     {
+//       "name": string,
+//       "size": "Small" | "Medium" | "Large",
+//       "spice": "Mild" | "Medium" | "Hot",
+//       "qty": number,
+//       "pieces": number | null,
+//       "half": boolean
+//     }
+//   ]
+// }
+
+// Message:
+// "${message}"
+// `;
+
+//   try {
+//     const res = await openai.chat.completions.create({
+//       model: "gpt-4o-mini",
+//       temperature: 0,
+//       messages: [{ role: "system", content: prompt }]
+//     });
+//     return JSON.parse(res.choices[0].message.content);
+//   } catch {
+//     return {};
+//   }
+// }
+
+// /* =====================================================
+//    HELPERS
+// ===================================================== */
+
+// function voice(text) {
+//   return text.replace(/\n+/g, ". ").replace(/\s{2,}/g, " ").trim();
+// }
+
+// function calcTotal(session) {
+//   let total = 0;
+//   for (const p of session.pizzas) {
+//     if (p.size && p.name) {
+//       total += PRICE_TABLE[p.size]?.[p.name] || 0;
+//     }
+//   }
+//   return total.toFixed(2);
+// }
+
+// function readOrder(session) {
+//   return session.pizzas
+//     .map(p => {
+//       if (p.half) {
+//         return `one ${p.size} half and half pizza`;
+//       }
+//       return `${p.qty} ${p.size} ${p.name}, ${p.spice} spice` +
+//         (p.pieces ? `, cut into ${p.pieces} pieces` : "");
+//     })
+//     .join(", ");
+// }
+
+// /* =====================================================
+//    CORE BRAIN
+// ===================================================== */
+
+// async function reply(session, speech) {
+//   const clean = speech.trim();
+//   const lower = clean.toLowerCase();
+//   const ai = await extract(clean);
+
+//   /* ---------- MENU ---------- */
+//   if (ai.intent === "menu") {
+//     return `We have ${MENU.join(", ")}. What would you like to order?`;
+//   }
+
+//   /* ---------- AVAILABILITY ---------- */
+//   if (ai.intent === "availability" && ai.pizzas?.length) {
+//     const name = ai.pizzas[0].name;
+//     return MENU.includes(name)
+//       ? `Yes, ${name} is available.`
+//       : `Sorry, we do not have ${name}.`;
+//   }
+
+//   /* ---------- PRICE / TOTAL ---------- */
+//   if ((ai.intent === "price" || ai.intent === "total") && session.pizzas.length) {
+//     return `Your total is ${calcTotal(session)} dollars.`;
+//   }
+
+//   /* ---------- DELIVERY ANYTIME ---------- */
+//   if (ai.orderType === "Delivery") {
+//     session.orderType = "Delivery";
+//   }
+
+//   /* ---------- ADD PIZZAS ---------- */
+//   if (ai.pizzas?.length) {
+//     for (const p of ai.pizzas) {
+//       session.pizzas.push({
+//         name: p.name,
+//         size: p.size,
+//         spice: p.spice,
+//         qty: p.qty || 1,
+//         pieces: p.pieces || null,
+//         half: p.half || false
+//       });
+//     }
+
+//     session.awaitingConfirmation = true;
+//     return `Just to confirm, you want ${readOrder(session)}. Is that correct?`;
+//   }
+
+//   /* ---------- CONFIRM YES ---------- */
+//   if (session.awaitingConfirmation && /yes|correct/i.test(lower)) {
+//     session.awaitingConfirmation = false;
+
+//     if (session.orderType === "Delivery" && !session.address) {
+//       session.expectingAddress = true;
+//       return "Please tell me the delivery address.";
+//     }
+
+//     return finalize(session);
+//   }
+
+//   /* ---------- CONFIRM NO ---------- */
+//   if (session.awaitingConfirmation && /no/i.test(lower)) {
+//     session.awaitingConfirmation = false;
+//     return "No problem. What would you like to change?";
+//   }
+
+//   /* ---------- ADDRESS ---------- */
+//   if (session.expectingAddress && clean.length > 5) {
+//     session.address = clean;
+//     session.expectingAddress = false;
+//     return finalize(session);
+//   }
+
+//   return "Sorry, I didn’t quite understand that. Could you repeat your order?";
+// }
+
+// /* =====================================================
+//    FINALIZE ORDER
+// ===================================================== */
+
+// function finalize(session) {
+//   const total = calcTotal(session);
+
+//   const ticket = {
+//     id: `P64-${Date.now()}`,
+//     time: new Date().toLocaleTimeString(),
+//     phone: session.phone,
+//     orderType: session.orderType || "Pickup",
+//     address: session.address || null,
+//     pizzas: session.pizzas,
+//     total
+//   };
+
+//   const existing = JSON.parse(fs.readFileSync(TICKETS_FILE, "utf8"));
+//   existing.unshift(ticket);
+//   fs.writeFileSync(TICKETS_FILE, JSON.stringify(existing, null, 2));
+
+//   return `Your order is confirmed. ${readOrder(session)}. 
+// ${session.orderType === "Delivery"
+//     ? `Delivery to ${session.address}.`
+//     : "Pickup order."}
+// Your total is ${total} dollars. Thank you for calling Pizza 64.`;
+// }
+
+// /* =====================================================
+//    TWILIO ENTRY
+// ===================================================== */
+
+// app.post("/twilio/voice", (req, res) => {
+//   const twiml = new twilio.twiml.VoiceResponse();
+//   twiml.say("Welcome to Pizza 64. What can I get for you today?");
+//   twiml.gather({
+//     input: "speech",
+//     action: "/twilio/step",
+//     method: "POST",
+//     timeout: 5
+//   });
+//   res.type("text/xml").send(twiml.toString());
+// });
+
+// app.post("/twilio/step", async (req, res) => {
+//   const callSid = req.body.CallSid;
+//   const speech = req.body.SpeechResult || "";
+
+//   if (!sessions.has(callSid)) {
+//     sessions.set(callSid, {
+//       phone: req.body.From,
+//       pizzas: [],
+//       orderType: "Pickup",
+//       address: null,
+//       awaitingConfirmation: false,
+//       expectingAddress: false
+//     });
+//   }
+
+//   const session = sessions.get(callSid);
+
+//   if (!speech) {
+//     const twiml = new twilio.twiml.VoiceResponse();
+//     twiml.say("Sorry, I didn't catch that. Please repeat.");
+//     twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+//     return res.type("text/xml").send(twiml.toString());
+//   }
+
+//   const response = await reply(session, speech);
+
+//   const twiml = new twilio.twiml.VoiceResponse();
+//   twiml.say(voice(response));
+//   twiml.gather({ input: "speech", action: "/twilio/step", method: "POST" });
+
+//   res.type("text/xml").send(twiml.toString());
+// });
+
+// /* =====================================================
+//    TICKETS API
+// ===================================================== */
+
+// app.get("/api/tickets", (req, res) => {
+//   const data = fs.readFileSync(TICKETS_FILE, "utf8");
+//   res.json(JSON.parse(data));
+// });
+
+// /* =====================================================
+//    SERVER
+// ===================================================== */
+
+// app.listen(PORT, () => {
+//   console.log("🍕 Pizza 64 Voice AI running on port", PORT);
+// });
 
 //7.7
 
