@@ -1,0 +1,53 @@
+{
+  "id": "pizza64",
+  "name": "Pizza 64",
+  "twilio_phone": "+16045550000",
+
+  "business_type": "restaurant",
+
+  "conversation": {
+    "greeting": "Hi, this is Pizza 64. How can I help you today?",
+    "ask_sides": true,
+    "ask_delivery_address": true,
+    "repeat_until_confirmed": true
+  },
+
+  "ai_instructions": [
+    "The customer may speak fast or change their order mid sentence",
+    "Always respect the latest order the customer says",
+    "Do not repeat the full menu unless asked",
+    "If something is unclear, politely ask the customer to repeat",
+    "Sound friendly and natural like a real store employee"
+  ],
+
+  "attributes": ["size", "spice"],
+
+  "menu": {
+    "Pesto Veggie Pizza": {
+      "options": {
+        "size": {
+          "Small": 11.49,
+          "Medium": 13.49,
+          "Large": 15.49
+        },
+        "spice": ["Mild", "Medium", "Hot"]
+      }
+    },
+    "Shahi Paneer": {
+      "options": {
+        "size": {
+          "Small": 13.99,
+          "Medium": 15.99,
+          "Large": 17.99
+        },
+        "spice": ["Mild", "Medium", "Hot"]
+      }
+    }
+  },
+
+  "sides": {
+    "Garlic Bread": 4.99,
+    "wings": 3.99,
+    "Ranch": 0.99
+  }
+}
