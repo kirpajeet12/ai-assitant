@@ -211,6 +211,97 @@ function buildConfirmation(store, session) {
 
   return `Please confirm your order. ${items}.${sides} Is that correct?`;
 }
+/* =========================
+   CHAT TEST API (NO TWILIO)
+========================= */
+
+app.post("/chat", async (req, res) => {
+  try {
+    const { sessionId, message, toPhone } = req.body;
+
+    const store = getStoreByPhone(toPhone);
+    if (!store) {
+      return res.json({ reply: "Store not found." });
+    }
+
+    if (!sessions.has(sessionId)) {
+      sessions.set(sessionId, {
+        store_id: store.id,
+        caller: "CHAT_USER",
+        items: [],
+        sides: [],
+        orderType: null,
+        address: null,
+        confirming: false,
+        sidesAsked: false
+      });
+    }
+
+    const session = sessions.get(sessionId);
+
+    if (!message || !message.trim()) {
+      return res.json({ reply: "Please type something." });
+    }
+
+    const ai = await extractMeaning(store, message);
+
+    if (!ai || typeof ai !== "object") {
+      return res.json({ reply: "Sorry, I didn’t understand that." });
+    }
+
+    if (ai.orderType) session.orderType = ai.orderType;
+    if (Array.isArray(ai.items) && ai.items.length) {
+      session.items = ai.items;
+      session.confirming = false;
+    }
+    if (Array.isArray(ai.sides)) session.sides = ai.sides;
+    if (ai.address) session.address = ai.address;
+
+    const q = nextQuestion(store, session);
+
+    if (q === "confirm" && !session.confirming) {
+      session.confirming = true;
+      return res.json({
+        reply: buildConfirmation(store, session)
+      });
+    }
+
+    if (session.confirming && /^(yes|yeah|correct)$/i.test(message)) {
+      const pricing = calculateTotal(store, session);
+
+      createTicket({
+        store_id: store.id,
+        caller: "CHAT_USER",
+        items: session.items,
+        sides: session.sides,
+        orderType: session.orderType || "Pickup",
+        address: session.address || null,
+        pricing
+      });
+
+      sessions.delete(sessionId);
+
+      return res.json({
+        reply: `✅ Order confirmed. Total: $${pricing.total}`
+      });
+    }
+
+    if (session.confirming && /^(no|wrong)$/i.test(message)) {
+      session.confirming = false;
+      return res.json({
+        reply: "No problem. Please tell me the correct order."
+      });
+    }
+
+    return res.json({
+      reply: typeof q === "string" ? q : "How can I help you?"
+    });
+
+  } catch (err) {
+    console.error("❌ Chat error:", err);
+    res.json({ reply: "Something went wrong." });
+  }
+});
 
 /* =========================
    SERVER
