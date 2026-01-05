@@ -1,3 +1,4 @@
+
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -29,7 +30,7 @@ app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
 const PORT = process.env.PORT || 10000;
 
 /* =========================
-   IN-MEMORY SESSIONS
+   SESSIONS
 ========================= */
 
 const sessions = new Map();
@@ -44,13 +45,11 @@ app.post("/twilio/voice", (req, res) => {
 
   twiml.say(
     { voice: "alice", language: "en-CA" },
-    store?.conversation?.greeting ||
-      "Hi, how can I help you today?"
+    store?.conversation?.greeting || "Hi, how can I help you today?"
   );
 
   twiml.gather({
     input: "speech",
-    language: "en-CA",
     bargeIn: true,
     speechTimeout: "auto",
     action: "/twilio/step",
@@ -59,6 +58,64 @@ app.post("/twilio/voice", (req, res) => {
 
   res.type("text/xml").send(twiml.toString());
 });
+
+/* =========================
+   TWILIO + CHAT LOGIC
+========================= */
+
+async function handleMessage(store, session, text) {
+  const speech = text.toLowerCase();
+
+  /* ---------- MENU QUESTIONS ---------- */
+  if (/what.*pizza|pizza.*have|menu|types.*pizza/i.test(speech)) {
+    return `We have ${Object.keys(store.menu).join(", ")}.`;
+  }
+
+  if (/what.*side|side.*available/i.test(speech)) {
+    return `We have ${Object.keys(store.sides).join(", ")}.`;
+  }
+
+  /* ---------- NO SIDES ---------- */
+  if (/no sides|without sides|nothing extra/i.test(speech)) {
+    session.sides = [];
+    return "Alright, no sides.";
+  }
+
+  /* ---------- AI EXTRACTION ---------- */
+  const ai = await extractMeaning(store, text);
+  if (!ai || typeof ai !== "object") {
+    return "Sorry, I didn’t understand that. Could you repeat?";
+  }
+
+  if (ai.orderType) session.orderType = ai.orderType;
+
+  if (Array.isArray(ai.items) && ai.items.length) {
+    session.items = ai.items.map(i => ({
+      ...i,
+      size: i.size || "Medium" // fallback safety
+    }));
+    session.confirming = false;
+  }
+
+  if (Array.isArray(ai.sides)) {
+    session.sides = ai.sides;
+  }
+
+  if (ai.address) session.address = ai.address;
+
+  /* ---------- NEXT QUESTION ---------- */
+  const q = nextQuestion(store, session);
+
+  if (q === "confirm") {
+    const missingSize = session.items.some(i => !i.size);
+    if (missingSize) return "What size would you like?";
+
+    session.confirming = true;
+    return buildConfirmation(session);
+  }
+
+  return q || "How can I help you?";
+}
 
 /* =========================
    TWILIO STEP
@@ -70,7 +127,7 @@ app.post("/twilio/step", async (req, res) => {
     if (!store) return res.sendStatus(404);
 
     const callSid = req.body.CallSid;
-    const speech = (req.body.SpeechResult || "").trim();
+    const text = (req.body.SpeechResult || "").trim();
 
     if (!sessions.has(callSid)) {
       sessions.set(callSid, {
@@ -80,57 +137,17 @@ app.post("/twilio/step", async (req, res) => {
         sides: [],
         orderType: null,
         address: null,
-        confirming: false,
-        sidesAsked: false
+        confirming: false
       });
     }
 
     const session = sessions.get(callSid);
 
-    // silence handling
-    if (!speech) {
+    if (!text) {
       return respond(res, "Sorry, I didn’t catch that. Please say it again.");
     }
 
-    const ai = await extractMeaning(store, speech);
-
-    if (!ai || typeof ai !== "object") {
-      return respond(res, "Sorry, I didn’t understand. Please repeat.");
-    }
-
-    // ORDER TYPE
-    if (ai.orderType) session.orderType = ai.orderType;
-
-    // ITEMS (latest always wins)
-    if (Array.isArray(ai.items) && ai.items.length > 0) {
-      session.items = ai.items;
-      session.confirming = false;
-    }
-
-    // SIDES
-    if (Array.isArray(ai.sides)) {
-      session.sides = ai.sides;
-    }
-
-    // ADDRESS
-    if (ai.address) {
-      session.address = ai.address;
-    }
-
-    const q = nextQuestion(store, session);
-    const question =
-      typeof q === "string" && q.length
-        ? q
-        : "Is there anything else I can help you with?";
-
-    // CONFIRM
-    if (question === "confirm" && !session.confirming) {
-      session.confirming = true;
-      return respond(res, buildConfirmation(store, session));
-    }
-
-    // YES CONFIRM
-    if (session.confirming && /^(yes|yeah|correct)$/i.test(speech)) {
+    if (session.confirming && /^(yes|confirm|correct)$/i.test(text)) {
       const pricing = calculateTotal(store, session);
 
       const ticket = {
@@ -153,19 +170,67 @@ app.post("/twilio/step", async (req, res) => {
       );
     }
 
-    // NO CONFIRM
-    if (session.confirming && /^(no|wrong)$/i.test(speech)) {
+    if (session.confirming && /^(no|wrong)$/i.test(text)) {
       session.confirming = false;
       return respond(res, "No problem. Please tell me the correct order.");
     }
 
-    return respond(res, question);
+    const reply = await handleMessage(store, session, text);
+    return respond(res, reply);
 
   } catch (err) {
     console.error("❌ Twilio error:", err);
     const twiml = new twilio.twiml.VoiceResponse();
     twiml.say("Sorry, something went wrong. Please try again.");
     res.type("text/xml").send(twiml.toString());
+  }
+});
+
+/* =========================
+   CHAT API (TESTING)
+========================= */
+
+app.post("/chat", async (req, res) => {
+  try {
+    const { sessionId, message, toPhone } = req.body;
+    const store = getStoreByPhone(toPhone);
+    if (!store) return res.json({ reply: "Store not found." });
+
+    if (!sessions.has(sessionId)) {
+      sessions.set(sessionId, {
+        store_id: store.id,
+        caller: "CHAT",
+        items: [],
+        sides: [],
+        orderType: null,
+        address: null,
+        confirming: false
+      });
+    }
+
+    const session = sessions.get(sessionId);
+    const reply = await handleMessage(store, session, message);
+
+    if (session.confirming && /^(yes|confirm|correct)$/i.test(message)) {
+      const pricing = calculateTotal(store, session);
+      createTicket({
+        store_id: store.id,
+        caller: "CHAT",
+        items: session.items,
+        sides: session.sides,
+        orderType: session.orderType || "Pickup",
+        address: session.address || null,
+        pricing
+      });
+      sessions.delete(sessionId);
+      return res.json({ reply: `✅ Order confirmed. Total $${pricing.total}` });
+    }
+
+    return res.json({ reply });
+
+  } catch (e) {
+    console.error(e);
+    res.json({ reply: "Something went wrong." });
   }
 });
 
@@ -186,7 +251,6 @@ function respond(res, text) {
   twiml.say({ voice: "alice", language: "en-CA" }, text);
   twiml.gather({
     input: "speech",
-    language: "en-CA",
     bargeIn: true,
     speechTimeout: "auto",
     action: "/twilio/step",
@@ -195,14 +259,9 @@ function respond(res, text) {
   res.type("text/xml").send(twiml.toString());
 }
 
-function buildConfirmation(store, session) {
+function buildConfirmation(session) {
   const items = session.items
-    .map((i, idx) => {
-      if (i.type === "half") {
-        return `${idx + 1}. Half ${i.left} / Half ${i.right} (${i.size})`;
-      }
-      return `${idx + 1}. ${i.qty || 1} ${i.size} ${i.name}`;
-    })
+    .map((i, idx) => `${idx + 1}. ${i.qty || 1} ${i.size} ${i.name}`)
     .join(". ");
 
   const sides = session.sides.length
@@ -211,97 +270,6 @@ function buildConfirmation(store, session) {
 
   return `Please confirm your order. ${items}.${sides} Is that correct?`;
 }
-/* =========================
-   CHAT TEST API (NO TWILIO)
-========================= */
-
-app.post("/chat", async (req, res) => {
-  try {
-    const { sessionId, message, toPhone } = req.body;
-
-    const store = getStoreByPhone(toPhone);
-    if (!store) {
-      return res.json({ reply: "Store not found." });
-    }
-
-    if (!sessions.has(sessionId)) {
-      sessions.set(sessionId, {
-        store_id: store.id,
-        caller: "CHAT_USER",
-        items: [],
-        sides: [],
-        orderType: null,
-        address: null,
-        confirming: false,
-        sidesAsked: false
-      });
-    }
-
-    const session = sessions.get(sessionId);
-
-    if (!message || !message.trim()) {
-      return res.json({ reply: "Please type something." });
-    }
-
-    const ai = await extractMeaning(store, message);
-
-    if (!ai || typeof ai !== "object") {
-      return res.json({ reply: "Sorry, I didn’t understand that." });
-    }
-
-    if (ai.orderType) session.orderType = ai.orderType;
-    if (Array.isArray(ai.items) && ai.items.length) {
-      session.items = ai.items;
-      session.confirming = false;
-    }
-    if (Array.isArray(ai.sides)) session.sides = ai.sides;
-    if (ai.address) session.address = ai.address;
-
-    const q = nextQuestion(store, session);
-
-    if (q === "confirm" && !session.confirming) {
-      session.confirming = true;
-      return res.json({
-        reply: buildConfirmation(store, session)
-      });
-    }
-
-    if (session.confirming && /^(yes|yeah|correct)$/i.test(message)) {
-      const pricing = calculateTotal(store, session);
-
-      createTicket({
-        store_id: store.id,
-        caller: "CHAT_USER",
-        items: session.items,
-        sides: session.sides,
-        orderType: session.orderType || "Pickup",
-        address: session.address || null,
-        pricing
-      });
-
-      sessions.delete(sessionId);
-
-      return res.json({
-        reply: `✅ Order confirmed. Total: $${pricing.total}`
-      });
-    }
-
-    if (session.confirming && /^(no|wrong)$/i.test(message)) {
-      session.confirming = false;
-      return res.json({
-        reply: "No problem. Please tell me the correct order."
-      });
-    }
-
-    return res.json({
-      reply: typeof q === "string" ? q : "How can I help you?"
-    });
-
-  } catch (err) {
-    console.error("❌ Chat error:", err);
-    res.json({ reply: "Something went wrong." });
-  }
-});
 
 /* =========================
    SERVER
@@ -310,7 +278,6 @@ app.post("/chat", async (req, res) => {
 app.listen(PORT, () => {
   console.log("🚀 Store AI running on port", PORT);
 });
-
 
 //version 1 
 
