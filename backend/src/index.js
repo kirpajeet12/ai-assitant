@@ -150,6 +150,26 @@ function extractSidesFromText(text, knownSides = []) {
     const sLow = s.toLowerCase();
     if (sLow && t.includes(sLow)) found.add(s);
   }
+/* =========================
+   STORE MENU & SIDES HELPERS
+========================= */
+
+function getMenuList(store) {
+  if (Array.isArray(store?.menu)) return store.menu;
+  if (store?.menu && typeof store.menu === "object") return Object.keys(store.menu);
+  if (Array.isArray(store?.data?.menu)) return store.data.menu;
+  if (store?.conversation?.menu) return Object.keys(store.conversation.menu);
+  return [];
+}
+
+function getSidesList(store) {
+  // ✅ Reads sides from pizza64.json even if stored as an object
+  if (Array.isArray(store?.sides)) return store.sides;
+  if (store?.sides && typeof store.sides === "object") return Object.keys(store.sides);
+  if (Array.isArray(store?.data?.sides)) return store.data.sides;
+  if (store?.conversation?.sides) return Object.keys(store.conversation.sides);
+  return [];
+}
 
   // Fallback detection for common items
   const common = [
