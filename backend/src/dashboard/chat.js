@@ -1,88 +1,90 @@
-// dashboard/chat.js
-// This file powers the test chat UI in the browser.
+/**
+ * chat.js
+ * - Stores sessionId in localStorage so conversation continues
+ * - Calls /api/chat for replies
+ */
 
-// Generate or reuse a sessionId so your chat remembers the conversation
-function makeSessionId() {
-  // crypto.randomUUID() exists in modern browsers
-  return (crypto?.randomUUID?.() || (Date.now() + "-" + Math.random())).toString();
-}
-
-// Persist sessionId in localStorage so page refresh keeps the same conversation
-let sessionId = localStorage.getItem("sessionId");
-if (!sessionId) {
-  sessionId = makeSessionId();
-  localStorage.setItem("sessionId", sessionId);
-}
-
-// Grab UI elements from the page
 const chatEl = document.getElementById("chat");
-const formEl = document.getElementById("form");
-const msgEl = document.getElementById("msg");
+const textEl = document.getElementById("text");
+const sendBtn = document.getElementById("sendBtn");
+const resetBtn = document.getElementById("resetBtn");
 const storePhoneEl = document.getElementById("storePhone");
-const newSessionBtn = document.getElementById("newSessionBtn");
 
-// Helper: add a message bubble to the chat window
-function addBubble(role, text) {
-  const div = document.createElement("div");
-  div.className = "bubble " + role; // "bubble user" or "bubble bot"
-  div.textContent = text;
-  chatEl.appendChild(div);
+// Keep session across refresh
+let sessionId = localStorage.getItem("store_ai_sessionId") || "";
+
+// Helper: render message bubble
+function addMessage(role, text) {
+  const row = document.createElement("div");
+  row.className = `msg ${role}`;
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+
+  row.appendChild(bubble);
+  chatEl.appendChild(row);
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
-// Start a new session (clears chat + new sessionId)
-newSessionBtn.addEventListener("click", () => {
-  sessionId = makeSessionId();
-  localStorage.setItem("sessionId", sessionId);
-  chatEl.innerHTML = "";
-  addBubble("bot", "New session started. What would you like to order?");
-});
-
-// Send the user message to your backend API
-async function sendMessage(text) {
+// Call server
+async function sendText(text) {
   const storePhone = storePhoneEl.value.trim();
 
-  // Store phone is required because your backend uses getStoreByPhone(storePhone)
   if (!storePhone) {
-    addBubble("bot", "Please enter Store Phone first (same as Twilio 'To').");
+    addMessage("bot", "⚠️ Enter your store phone first (same number Twilio uses in To).");
     return;
   }
 
-  // Show user message in UI
-  addBubble("user", text);
-
-  // Call your backend
-  const resp = await fetch("/api/chat/step", {
+  const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sessionId,        // session key
-      storePhone,       // store identifier
-      message: text     // user text
-    })
+    body: JSON.stringify({ storePhone, sessionId, text })
   });
 
-  // Parse response JSON
-  const data = await resp.json();
-
-  // Handle errors from server
-  if (!resp.ok || data.error) {
-    addBubble("bot", "Error: " + (data.error || "Request failed"));
+  const data = await res.json();
+  if (!res.ok) {
+    addMessage("bot", data.error || "Something went wrong.");
     return;
   }
 
-  // Show bot reply
-  addBubble("bot", data.reply || "…");
+  // Save sessionId if server created it
+  sessionId = data.sessionId;
+  localStorage.setItem("store_ai_sessionId", sessionId);
+
+  addMessage("bot", data.reply);
 }
 
-// On form submit, send the typed message
-formEl.addEventListener("submit", (e) => {
-  e.preventDefault();           // stop page reload
-  const text = msgEl.value.trim();
-  if (!text) return;            // ignore empty
-  msgEl.value = "";             // clear input
-  sendMessage(text);            // send to backend
+// Send button
+sendBtn.addEventListener("click", async () => {
+  const text = textEl.value.trim();
+  if (!text) return;
+  addMessage("user", text);
+  textEl.value = "";
+  await sendText(text);
 });
 
-// Initial bot prompt
-addBubble("bot", "Enter Store Phone, then ask anything. Example: what pizzas do you have?");
+// Enter key
+textEl.addEventListener("keydown", async (e) => {
+  if (e.key === "Enter") {
+    sendBtn.click();
+  }
+});
+
+// Reset session
+resetBtn.addEventListener("click", async () => {
+  if (sessionId) {
+    await fetch("/api/chat/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId })
+    });
+  }
+  sessionId = "";
+  localStorage.removeItem("store_ai_sessionId");
+  chatEl.innerHTML = "";
+  addMessage("bot", "✅ New session started. What would you like to order?");
+});
+
+// Initial bot greeting
+addMessage("bot", "New session started. What would you like to order?");
