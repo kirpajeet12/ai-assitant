@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Store Dashboard</title>
+  <link rel="stylesheet" href="print.css" />
+</head>
+<body>
+
+  <h1>📋 Store Orders Dashboard</h1>
+
+  <div class="login">
+    <label>
+      Store ID:
+      <input id="storeId" placeholder="pizza64" />
+    </label>
+
+    <label>
+      Dashboard Token:
+      <input id="token" placeholder="pizza64-secret-123" />
+    </label>
+
+    <button onclick="loadTickets()">Load Orders</button>
+  </div>
+
+  <hr />
+
+  <div id="tickets"></div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
