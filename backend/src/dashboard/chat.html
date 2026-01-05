@@ -1,111 +1,38 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Store AI – Chat Test</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f4f6f8;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-    }
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Store AI - Test Chat</title>
 
-    .chatbox {
-      width: 400px;
-      background: white;
-      border-radius: 10px;
-      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-      display: flex;
-      flex-direction: column;
-    }
-
-    .messages {
-      flex: 1;
-      padding: 10px;
-      overflow-y: auto;
-    }
-
-    .msg {
-      margin-bottom: 8px;
-    }
-
-    .user {
-      text-align: right;
-      color: #0b5ed7;
-    }
-
-    .bot {
-      text-align: left;
-      color: #333;
-    }
-
-    .input {
-      display: flex;
-      border-top: 1px solid #ddd;
-    }
-
-    input {
-      flex: 1;
-      padding: 10px;
-      border: none;
-      outline: none;
-    }
-
-    button {
-      padding: 10px 15px;
-      border: none;
-      background: #0b5ed7;
-      color: white;
-      cursor: pointer;
-    }
-  </style>
+  <!-- If you already have print.css, you can keep it -->
+  <link rel="stylesheet" href="./print.css" />
+  <!-- Or add a tiny chat CSS file (recommended) -->
+  <link rel="stylesheet" href="./chat.css" />
 </head>
 <body>
+  <div class="wrap">
+    <h1>Store AI Test Chat</h1>
 
-<div class="chatbox">
-  <div class="messages" id="messages"></div>
-  <div class="input">
-    <input id="input" placeholder="Type your order..." />
-    <button onclick="send()">Send</button>
+    <div class="row">
+      <label>Store Phone (same as Twilio “To”):</label>
+      <input id="storePhone" placeholder="+1XXXXXXXXXX" />
+      <button id="newSessionBtn" type="button">New Session</button>
+    </div>
+
+    <div id="chat" class="chat"></div>
+
+    <form id="form" class="composer">
+      <input id="msg" placeholder="Type… e.g. 1 large shahi paneer" autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+
+    <p class="hint">
+      Try: “what pizzas do you have?” • “1 large shahi paneer” • “hot” • “pickup” • “done”
+    </p>
   </div>
-</div>
 
-<script>
-  const sessionId = crypto.randomUUID();
-  const storePhone = "+12183963550"; // SAME as store JSON
-
-  async function send() {
-    const input = document.getElementById("input");
-    const text = input.value.trim();
-    if (!text) return;
-
-    add("user", text);
-    input.value = "";
-
-    const res = await fetch("/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId,
-        message: text,
-        toPhone: storePhone
-      })
-    });
-
-    const data = await res.json();
-    add("bot", data.reply);
-  }
-
-  function add(type, text) {
-    const div = document.createElement("div");
-    div.className = "msg " + type;
-    div.innerText = text;
-    document.getElementById("messages").appendChild(div);
-  }
-</script>
-
+  <!-- Put chat logic in its own file -->
+  <script src="./chat.js"></script>
 </body>
 </html>
