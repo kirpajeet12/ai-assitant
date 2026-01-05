@@ -12,6 +12,14 @@
     "repeat_until_confirmed": true
   },
 
+  "dashboard": {
+    "enabled": true,
+    "token": "pizza64-secret-123",
+    "show_prices": true,
+    "show_customer_phone": true,
+    "allow_printing": true
+  },
+
   "ai_instructions": [
     "The customer may speak fast or change their order mid sentence",
     "Always respect the latest order the customer says",
