@@ -1,7 +1,8 @@
 import fs from "fs";
 import path from "path";
 
-const storesDir = path.join(process.cwd(), "stores"); // make sure your pizza64.json is inside /stores
+ // make sure your pizza64.json is inside /stores
+const storesDir = path.join(process.cwd(), "src", "stores");
 
 function normalizePhone(raw) {
   let s = String(raw || "").trim();
