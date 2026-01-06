@@ -1,31 +1,39 @@
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const STORES_DIR = path.join(__dirname, "../data/stores");
+const storesDir = path.join(process.cwd(), "stores"); // make sure your pizza64.json is inside /stores
 
-export function getStoreByPhone(phone) {
-  const files = fs.readdirSync(STORES_DIR);
+function normalizePhone(raw) {
+  let s = String(raw || "").trim();
 
-  for (const f of files) {
-    const store = JSON.parse(
-      fs.readFileSync(path.join(STORES_DIR, f), "utf8")
-    );
-    if (store.twilio_phone === phone) return store;
-  }
-  return null;
+  // remove common prefixes if present
+  s = s.replace(/^whatsapp:/i, "");
+  s = s.replace(/^sip:/i, "");
+  s = s.replace(/^tel:/i, "");
+
+  // keep only digits
+  s = s.replace(/[^\d]/g, "");
+
+  // if it starts with 1 and length is 11, drop leading 1 (North America)
+  if (s.length === 11 && s.startsWith("1")) s = s.slice(1);
+
+  return s; // now it's like: 2183963550
 }
 
-export function getStoreById(id) {
-  const files = fs.readdirSync(STORES_DIR);
+export function getStoreByPhone(phone) {
+  const target = normalizePhone(phone);
+
+  const files = fs.existsSync(storesDir)
+    ? fs.readdirSync(storesDir).filter((f) => f.endsWith(".json"))
+    : [];
 
   for (const f of files) {
-    const store = JSON.parse(
-      fs.readFileSync(path.join(STORES_DIR, f), "utf8")
-    );
-    if (store.id === id) return store;
+    const full = path.join(storesDir, f);
+    const store = JSON.parse(fs.readFileSync(full, "utf8"));
+    const storePhone = normalizePhone(store.phone);
+
+    if (storePhone && storePhone === target) return store;
   }
+
   return null;
 }
