@@ -38,85 +38,9 @@
     </div>
   </div>
 
-  <script>
-    let sessionId = null;
+    <script src="./chat.js"></script>
+</body>
+</html>
 
-    const chatEl = document.getElementById("chat");
-    const msgEl = document.getElementById("msg");
-    const sendBtn = document.getElementById("sendBtn");
-    const startBtn = document.getElementById("startBtn");
-    const storePhoneEl = document.getElementById("storePhone");
-
-    function addBubble(text, who="bot") {
-      const row = document.createElement("div");
-      row.className = "row " + (who === "me" ? "me" : "bot");
-      const b = document.createElement("div");
-      b.className = "bubble";
-      b.textContent = text;
-      row.appendChild(b);
-      chatEl.appendChild(row);
-      chatEl.scrollTop = chatEl.scrollHeight;
-    }
-
-    async function start() {
-      chatEl.innerHTML = "";
-      addBubble("Starting session…", "bot");
-
-      const body = {
-        storePhone: storePhoneEl.value.trim() || undefined,
-        from: "web-user"
-      };
-
-      const r = await fetch("/api/chat/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-
-      const data = await r.json();
-      if (!r.ok) {
-        chatEl.innerHTML = "";
-        addBubble(data.error || "Failed to start.", "bot");
-        return;
-      }
-
-      sessionId = data.sessionId;
-      chatEl.innerHTML = "";
-      addBubble(data.message, "bot");
-      sendBtn.disabled = false;
-      msgEl.focus();
-    }
-
-    async function send() {
-      const text = msgEl.value.trim();
-      if (!text) return;
-
-      addBubble(text, "me");
-      msgEl.value = "";
-
-      const r = await fetch("/api/chat/message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, text })
-      });
-
-      const data = await r.json();
-      if (!r.ok) {
-        addBubble(data.error || "Something went wrong.", "bot");
-        return;
-      }
-
-      addBubble(data.message, "bot");
-    }
-
-    startBtn.addEventListener("click", start);
-    sendBtn.addEventListener("click", send);
-    msgEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") send();
-    });
-
-    // Auto-start
-    start();
-  </script>
 </body>
 </html>
