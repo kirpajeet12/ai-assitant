@@ -1,15 +1,28 @@
 // dashboard/chat.js
+/**
+ * dashboard/chat.js
+ *
+ * This file powers your chat.html UI:
+ * - Starts a chat session via POST /api/chat/start
+ * - Sends messages via POST /api/chat/message
+ *
+ * IMPORTANT:
+ * - You MUST reference this file from chat.html:
+ *   <script src="chat.js"></script>
+ */
 
-let sessionId = null;
-let isStarting = false;
-let isSending = false;
+let sessionId = null;       // Current session id returned by backend
+let isStarting = false;     // Prevent double-start spam
+let isSending = false;      // Prevent multi-send spam
 
+// Grab UI elements
 const chatEl = document.getElementById("chat");
 const msgEl = document.getElementById("msg");
 const sendBtn = document.getElementById("sendBtn");
 const startBtn = document.getElementById("startBtn");
 const storePhoneEl = document.getElementById("storePhone");
 
+// Add chat bubble to UI
 function addBubble(text, who = "bot") {
   const row = document.createElement("div");
   row.className = "row " + (who === "me" ? "me" : "bot");
@@ -23,6 +36,7 @@ function addBubble(text, who = "bot") {
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
+// Enable/disable buttons based on current state
 function setUiState({ canSend, starting, sending }) {
   isStarting = !!starting;
   isSending = !!sending;
@@ -32,6 +46,7 @@ function setUiState({ canSend, starting, sending }) {
   msgEl.disabled = !canSend || isStarting;
 }
 
+// Start a new chat session
 async function start() {
   if (isStarting) return;
 
@@ -41,7 +56,9 @@ async function start() {
 
   setUiState({ canSend: false, starting: true, sending: false });
 
+  // Build request body
   const body = {
+    // Optional store phone — if empty, backend uses DEFAULT_STORE_PHONE from env
     storePhone: storePhoneEl.value.trim() || undefined,
     from: "web-user"
   };
@@ -62,6 +79,7 @@ async function start() {
       return;
     }
 
+    // Save session id
     sessionId = data.sessionId;
 
     chatEl.innerHTML = "";
@@ -77,19 +95,23 @@ async function start() {
   }
 }
 
+// Send a message
 async function send() {
   const text = msgEl.value.trim();
   if (!text) return;
 
+  // If no session, force user to Start again
   if (!sessionId) {
     addBubble("Session not started. Click Start.", "bot");
     return;
   }
 
+  // Prevent double-send spam
   if (isSending) return;
 
   addBubble(text, "me");
   msgEl.value = "";
+
   setUiState({ canSend: true, starting: false, sending: true });
 
   try {
@@ -108,6 +130,16 @@ async function send() {
     }
 
     addBubble(data.message || "(no response)", "bot");
+
+    // If backend ended the session (order confirmed), sessionId is now invalid
+    // We detect that by message content. You can also add a flag later.
+    if ((data.message || "").toLowerCase().includes("order is confirmed")) {
+      sessionId = null;
+      setUiState({ canSend: false, starting: false, sending: false });
+      addBubble("Session closed. Click Start to begin a new order.", "bot");
+      return;
+    }
+
     setUiState({ canSend: true, starting: false, sending: false });
     msgEl.focus();
   } catch (err) {
@@ -117,14 +149,17 @@ async function send() {
   }
 }
 
-// Wire up UI
+// Wire buttons
 startBtn.addEventListener("click", start);
 sendBtn.addEventListener("click", send);
 
+// Enter key sends message
 msgEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") send();
 });
 
-// Initial UI state + auto start
+// Initial UI state
 setUiState({ canSend: false, starting: false, sending: false });
+
+// Auto-start session on load
 start();
