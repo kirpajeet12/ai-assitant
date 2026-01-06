@@ -1,103 +1,130 @@
-/**
- * dashboard.js
- * Frontend logic for chat.html
- * - Starts a new session using GET /api/chat/start
- * - Sends messages using POST /api/chat/turn
- */
+// dashboard/chat.js
 
-let sessionId = null; // holds current chat session id
+let sessionId = null;
+let isStarting = false;
+let isSending = false;
 
-const messagesEl = document.getElementById("messages"); // message container
-const inputEl = document.getElementById("input"); // text input
-const metaEl = document.getElementById("meta"); // debug/meta line
-const sendBtn = document.getElementById("send"); // send button
-const newBtn = document.getElementById("new"); // new session button
+const chatEl = document.getElementById("chat");
+const msgEl = document.getElementById("msg");
+const sendBtn = document.getElementById("sendBtn");
+const startBtn = document.getElementById("startBtn");
+const storePhoneEl = document.getElementById("storePhone");
 
-// Append a message bubble to the UI
-function addMessage(who, text) {
-  const row = document.createElement("div"); // row div
-  row.className = "row " + (who === "me" ? "me" : "bot"); // align based on sender
+function addBubble(text, who = "bot") {
+  const row = document.createElement("div");
+  row.className = "row " + (who === "me" ? "me" : "bot");
 
-  const bubble = document.createElement("div"); // bubble div
-  bubble.className = "bubble"; // bubble styling
-  bubble.textContent = text; // set text
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = text;
 
-  row.appendChild(bubble); // add bubble to row
-  messagesEl.appendChild(row); // add row to messages
-
-  // Auto-scroll to bottom
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  row.appendChild(b);
+  chatEl.appendChild(row);
+  chatEl.scrollTop = chatEl.scrollHeight;
 }
 
-// Start a new session and show greeting
-async function startSession() {
-  // Clear UI
-  messagesEl.innerHTML = "";
-  metaEl.textContent = "";
+function setUiState({ canSend, starting, sending }) {
+  isStarting = !!starting;
+  isSending = !!sending;
 
-  // Call server
-  const res = await fetch("/api/chat/start"); // GET start
-  const data = await res.json(); // parse json
-
-  // Save session id
-  sessionId = data.sessionId;
-
-  // Show greeting from server
-  addMessage("bot", data.greeting);
-
-  // Show meta info
-  metaEl.textContent =
-    `Session: ${sessionId} | Store: ${data.store.name} | Menu: ${data.store.menuCount} | Sides: ${data.store.sidesCount} | Config: ${data.store.configPath || "fallback"}`;
+  sendBtn.disabled = !canSend || isStarting || isSending;
+  startBtn.disabled = isStarting;
+  msgEl.disabled = !canSend || isStarting;
 }
 
-// Send one message turn
-async function sendMessage() {
-  const text = (inputEl.value || "").trim(); // read input
-  if (!text) return; // do nothing if empty
+async function start() {
+  if (isStarting) return;
 
-  // Show user message immediately
-  addMessage("me", text);
-  inputEl.value = ""; // clear input
-  inputEl.focus(); // focus input
+  sessionId = null;
+  chatEl.innerHTML = "";
+  addBubble("Starting session…", "bot");
 
-  // Safety: if no session yet, start one
-  if (!sessionId) {
-    await startSession();
+  setUiState({ canSend: false, starting: true, sending: false });
+
+  const body = {
+    storePhone: storePhoneEl.value.trim() || undefined,
+    from: "web-user"
+  };
+
+  try {
+    const r = await fetch("/api/chat/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    const data = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      chatEl.innerHTML = "";
+      addBubble(data.error || "Failed to start session.", "bot");
+      setUiState({ canSend: false, starting: false, sending: false });
+      return;
+    }
+
+    sessionId = data.sessionId;
+
+    chatEl.innerHTML = "";
+    addBubble(data.message || "Session started.", "bot");
+
+    setUiState({ canSend: true, starting: false, sending: false });
+    msgEl.focus();
+  } catch (err) {
+    console.error("Start error:", err);
+    chatEl.innerHTML = "";
+    addBubble("Server not reachable. Make sure your Node server is running.", "bot");
+    setUiState({ canSend: false, starting: false, sending: false });
   }
+}
 
-  // Call server
-  const res = await fetch("/api/chat/turn", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, message: text })
-  });
+async function send() {
+  const text = msgEl.value.trim();
+  if (!text) return;
 
-  const data = await res.json(); // parse response
-
-  // If server errors
-  if (data.error) {
-    addMessage("bot", "Error: " + data.error);
+  if (!sessionId) {
+    addBubble("Session not started. Click Start.", "bot");
     return;
   }
 
-  // Show bot reply
-  addMessage("bot", data.reply);
+  if (isSending) return;
 
-  // If session ended, show note and clear sessionId
-  if (data.end) {
-    addMessage("bot", "✅ Session ended. Click 'New Session' to start again.");
-    sessionId = null;
+  addBubble(text, "me");
+  msgEl.value = "";
+  setUiState({ canSend: true, starting: false, sending: true });
+
+  try {
+    const r = await fetch("/api/chat/message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, text })
+    });
+
+    const data = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      addBubble(data.error || "Something went wrong.", "bot");
+      setUiState({ canSend: true, starting: false, sending: false });
+      return;
+    }
+
+    addBubble(data.message || "(no response)", "bot");
+    setUiState({ canSend: true, starting: false, sending: false });
+    msgEl.focus();
+  } catch (err) {
+    console.error("Send error:", err);
+    addBubble("Server not reachable. Check console + server logs.", "bot");
+    setUiState({ canSend: true, starting: false, sending: false });
   }
 }
 
-// Button handlers
-sendBtn.addEventListener("click", sendMessage); // click send
-newBtn.addEventListener("click", startSession); // click new session
+// Wire up UI
+startBtn.addEventListener("click", start);
+sendBtn.addEventListener("click", send);
 
-// Enter key sends message
-inputEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") sendMessage();
+msgEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") send();
 });
 
-// Start immediately on load
-startSession();
+// Initial UI state + auto start
+setUiState({ canSend: false, starting: false, sending: false });
+start();
