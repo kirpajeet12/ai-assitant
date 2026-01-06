@@ -1,61 +1,243 @@
 {
-  "id": "pizza64",
-  "name": "Pizza 64",
-  "twilio_phone": "+12183963550",
-
-  "business_type": "restaurant",
-
+  "id": "pizza64-surrey-132nd",
+  "name": "Pizza 64 (Surrey 132nd)",
+  "phone": "+2183963550",
   "conversation": {
-    "greeting": "Hi, this is Pizza 64. How can I help you today?",
-    "ask_sides": true,
-    "ask_delivery_address": true,
-    "repeat_until_confirmed": true
+    "greeting": "New session started. What would you like to order? You can ask: menu, veg options, or sides."
   },
-
-  "dashboard": {
-    "enabled": true,
-    "token": "pizza64-secret-123",
-    "show_prices": true,
-    "show_customer_phone": true,
-    "allow_printing": true
+  "settings": {
+    "supportedSizes": ["Small", "Medium", "Large"],
+    "orderTypes": ["Pickup", "Delivery"]
   },
-
-  "ai_instructions": [
-    "The customer may speak fast or change their order mid sentence",
-    "Always respect the latest order the customer says",
-    "Do not repeat the full menu unless asked",
-    "If something is unclear, politely ask the customer to repeat",
-    "Sound friendly and natural like a real store employee"
-  ],
-
-  "attributes": ["size", "spice"],
-
   "menu": {
-    "Pesto Veggie Pizza": {
-      "options": {
-        "size": {
-          "Small": 11.49,
-          "Medium": 13.49,
-          "Large": 15.49
+    "pizzas": {
+      "specialty": [
+        {
+          "name": "Cheese Lovers Pizza",
+          "veg": true,
+          "requiresSpice": false,
+          "aliases": ["cheese lovers", "cheese lover"]
         },
-        "spice": ["Mild", "Medium", "Hot"]
-      }
+        {
+          "name": "Pepperoni Extravaganza Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["pepperoni extravaganza", "double pepperoni"]
+        },
+        {
+          "name": "Hawaiian Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["hawaiian"]
+        },
+        {
+          "name": "Garden Fresh Pizza",
+          "veg": true,
+          "requiresSpice": false,
+          "aliases": ["garden fresh", "vegetarian", "veggie"]
+        },
+        {
+          "name": "Triple Meat Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["triple meat", "meat pizza"]
+        },
+        {
+          "name": "Chicken Bacon Ranch Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["chicken bacon ranch", "cbr pizza"]
+        },
+        {
+          "name": "Canucks Special Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["canucks special"]
+        },
+        {
+          "name": "Peppery Pineapple Pizza",
+          "veg": true,
+          "requiresSpice": true,
+          "aliases": ["peppery pineapple", "jalapeno pineapple", "banana pepper pineapple"]
+        },
+        {
+          "name": "Canadian Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["canadian"]
+        }
+      ],
+      "signature": [
+        {
+          "name": "Meat Lovers Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["meat lovers", "meatlovers"]
+        },
+        {
+          "name": "Italian Feast Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["italian feast"]
+        },
+        {
+          "name": "Tropical Hawaiian Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["tropical hawaiian"]
+        },
+        {
+          "name": "Tandoori Chicken Pizza",
+          "veg": false,
+          "requiresSpice": true,
+          "aliases": ["tandoori chicken", "tandoori"]
+        },
+        {
+          "name": "BBQ Chicken Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["bbq chicken", "barbecue chicken"]
+        },
+        {
+          "name": "Pesto Chicken Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["pesto chicken"]
+        },
+        {
+          "name": "Pizza 64 Special Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["pizza 64 special", "the special", "special pizza"]
+        },
+        {
+          "name": "Pesto Veggie Pizza",
+          "veg": true,
+          "requiresSpice": false,
+          "aliases": ["pesto veggie", "pesto veg"]
+        },
+        {
+          "name": "House Special",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["house special"]
+        }
+      ],
+      "gourmet": [
+        {
+          "name": "Butter Chicken Pizza",
+          "veg": false,
+          "requiresSpice": true,
+          "aliases": ["butter chicken"]
+        },
+        {
+          "name": "Alfredo Chicken Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["alfredo chicken"]
+        },
+        {
+          "name": "Chef Created Special Pizza",
+          "veg": false,
+          "requiresSpice": true,
+          "aliases": ["chef created special", "chef special"]
+        },
+        {
+          "name": "Three Musketeers Pizza",
+          "veg": false,
+          "requiresSpice": true,
+          "aliases": ["three musketeers"]
+        },
+        {
+          "name": "Passion Of India Pizza",
+          "veg": true,
+          "requiresSpice": true,
+          "aliases": ["passion of india", "india pizza", "tandoori paneer"]
+        },
+        {
+          "name": "Shahi Paneer Pizza",
+          "veg": true,
+          "requiresSpice": true,
+          "aliases": ["shahi paneer", "shai paneer", "shai panner", "shahi panner", "paneer pizza"]
+        },
+        {
+          "name": "Blazin' Chicken",
+          "veg": false,
+          "requiresSpice": true,
+          "aliases": ["blazin chicken", "blazing chicken"]
+        },
+        {
+          "name": "Blazin Paneer",
+          "veg": true,
+          "requiresSpice": true,
+          "aliases": ["blazin paneer", "blazing paneer"]
+        }
+      ],
+      "seasonal": [
+        {
+          "name": "Greek Garden Pizza",
+          "veg": false,
+          "requiresSpice": false,
+          "aliases": ["greek garden"]
+        },
+        {
+          "name": "Mexican Taco Pizza",
+          "veg": false,
+          "requiresSpice": true,
+          "aliases": ["mexican taco", "taco pizza"]
+        }
+      ]
     },
-    "Shahi Paneer": {
-      "options": {
-        "size": {
-          "Small": 13.99,
-          "Medium": 15.99,
-          "Large": 17.99
-        },
-        "spice": ["Mild", "Medium", "Hot"]
+    "sides": [
+      {
+        "name": "Jalapeno Cheddar Cheese Sticks",
+        "aliases": ["jalapeno cheddar sticks", "cheese sticks jalapeno"]
+      },
+      {
+        "name": "Breadsticks (8 pcs)",
+        "aliases": ["breadsticks", "bread sticks"]
+      },
+      {
+        "name": "Cheese Sticks (8 pcs)",
+        "aliases": ["cheese sticks", "cheesy sticks"]
+      },
+      {
+        "name": "Garlic Toast (1 pc)",
+        "aliases": ["garlic toast", "toast"]
+      },
+      {
+        "name": "Potato Wedges",
+        "aliases": ["wedges", "potato wedges"]
+      },
+      {
+        "name": "Dip",
+        "aliases": ["dip", "ranch dip", "garlic dip", "cheddar habanero dip"]
       }
-    }
-  },
-
-  "sides": {
-    "Garlic Bread": 4.99,
-    "Fries": 3.99,
-    "Ranch": 0.99
+    ],
+    "wings": [
+      {
+        "name": "Chicken Wings (10pc)",
+        "aliases": ["10 wings", "wings 10"],
+        "options": {
+          "type": ["Boneless", "Traditional"],
+          "flavor": ["Teriyaki", "Buffalo Hot", "BBQ", "Honey Garlic", "Suicide Hot"]
+        }
+      }
+    ],
+    "pastas": [
+      { "name": "Lasagna with Meat Sauce", "aliases": ["meat lasagna", "lasagna meat sauce"] },
+      { "name": "Lasagna with Meatballs", "aliases": ["meatball lasagna", "lasagna meatballs"] },
+      { "name": "Lasagna with Veggies", "aliases": ["veg lasagna", "vegetable lasagna"] },
+      { "name": "Lasagna with Chicken", "aliases": ["chicken lasagna"] }
+    ],
+    "salads": [
+      { "name": "Greek Salad", "aliases": ["greek salad"] },
+      { "name": "Caesar Salad", "aliases": ["caesar salad"] },
+      { "name": "Caesar Salad with Chicken", "aliases": ["chicken caesar", "caesar chicken"] }
+    ],
+    "beverages": [
+      { "name": "Can Pop (350ml)", "aliases": ["can pop", "pop can", "coke can", "sprite can", "pepsi can"] },
+      { "name": "Pop Bottle (2L)", "aliases": ["2l pop", "pop bottle", "2 litre", "2 liter"] }
+    ]
   }
 }
