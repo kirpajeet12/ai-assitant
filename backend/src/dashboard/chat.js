@@ -1,90 +1,103 @@
 /**
- * chat.js
- * - Stores sessionId in localStorage so conversation continues
- * - Calls /api/chat for replies
+ * dashboard.js
+ * Frontend logic for chat.html
+ * - Starts a new session using GET /api/chat/start
+ * - Sends messages using POST /api/chat/turn
  */
 
-const chatEl = document.getElementById("chat");
-const textEl = document.getElementById("text");
-const sendBtn = document.getElementById("sendBtn");
-const resetBtn = document.getElementById("resetBtn");
-const storePhoneEl = document.getElementById("storePhone");
+let sessionId = null; // holds current chat session id
 
-// Keep session across refresh
-let sessionId = localStorage.getItem("store_ai_sessionId") || "";
+const messagesEl = document.getElementById("messages"); // message container
+const inputEl = document.getElementById("input"); // text input
+const metaEl = document.getElementById("meta"); // debug/meta line
+const sendBtn = document.getElementById("send"); // send button
+const newBtn = document.getElementById("new"); // new session button
 
-// Helper: render message bubble
-function addMessage(role, text) {
-  const row = document.createElement("div");
-  row.className = `msg ${role}`;
+// Append a message bubble to the UI
+function addMessage(who, text) {
+  const row = document.createElement("div"); // row div
+  row.className = "row " + (who === "me" ? "me" : "bot"); // align based on sender
 
-  const bubble = document.createElement("div");
-  bubble.className = "bubble";
-  bubble.textContent = text;
+  const bubble = document.createElement("div"); // bubble div
+  bubble.className = "bubble"; // bubble styling
+  bubble.textContent = text; // set text
 
-  row.appendChild(bubble);
-  chatEl.appendChild(row);
-  chatEl.scrollTop = chatEl.scrollHeight;
+  row.appendChild(bubble); // add bubble to row
+  messagesEl.appendChild(row); // add row to messages
+
+  // Auto-scroll to bottom
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// Call server
-async function sendText(text) {
-  const storePhone = storePhoneEl.value.trim();
+// Start a new session and show greeting
+async function startSession() {
+  // Clear UI
+  messagesEl.innerHTML = "";
+  metaEl.textContent = "";
 
-  if (!storePhone) {
-    addMessage("bot", "⚠️ Enter your store phone first (same number Twilio uses in To).");
-    return;
+  // Call server
+  const res = await fetch("/api/chat/start"); // GET start
+  const data = await res.json(); // parse json
+
+  // Save session id
+  sessionId = data.sessionId;
+
+  // Show greeting from server
+  addMessage("bot", data.greeting);
+
+  // Show meta info
+  metaEl.textContent =
+    `Session: ${sessionId} | Store: ${data.store.name} | Menu: ${data.store.menuCount} | Sides: ${data.store.sidesCount} | Config: ${data.store.configPath || "fallback"}`;
+}
+
+// Send one message turn
+async function sendMessage() {
+  const text = (inputEl.value || "").trim(); // read input
+  if (!text) return; // do nothing if empty
+
+  // Show user message immediately
+  addMessage("me", text);
+  inputEl.value = ""; // clear input
+  inputEl.focus(); // focus input
+
+  // Safety: if no session yet, start one
+  if (!sessionId) {
+    await startSession();
   }
 
-  const res = await fetch("/api/chat", {
+  // Call server
+  const res = await fetch("/api/chat/turn", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ storePhone, sessionId, text })
+    body: JSON.stringify({ sessionId, message: text })
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    addMessage("bot", data.error || "Something went wrong.");
+  const data = await res.json(); // parse response
+
+  // If server errors
+  if (data.error) {
+    addMessage("bot", "Error: " + data.error);
     return;
   }
 
-  // Save sessionId if server created it
-  sessionId = data.sessionId;
-  localStorage.setItem("store_ai_sessionId", sessionId);
-
+  // Show bot reply
   addMessage("bot", data.reply);
+
+  // If session ended, show note and clear sessionId
+  if (data.end) {
+    addMessage("bot", "✅ Session ended. Click 'New Session' to start again.");
+    sessionId = null;
+  }
 }
 
-// Send button
-sendBtn.addEventListener("click", async () => {
-  const text = textEl.value.trim();
-  if (!text) return;
-  addMessage("user", text);
-  textEl.value = "";
-  await sendText(text);
+// Button handlers
+sendBtn.addEventListener("click", sendMessage); // click send
+newBtn.addEventListener("click", startSession); // click new session
+
+// Enter key sends message
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendMessage();
 });
 
-// Enter key
-textEl.addEventListener("keydown", async (e) => {
-  if (e.key === "Enter") {
-    sendBtn.click();
-  }
-});
-
-// Reset session
-resetBtn.addEventListener("click", async () => {
-  if (sessionId) {
-    await fetch("/api/chat/reset", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId })
-    });
-  }
-  sessionId = "";
-  localStorage.removeItem("store_ai_sessionId");
-  chatEl.innerHTML = "";
-  addMessage("bot", "✅ New session started. What would you like to order?");
-});
-
-// Initial bot greeting
-addMessage("bot", "New session started. What would you like to order?");
+// Start immediately on load
+startSession();
