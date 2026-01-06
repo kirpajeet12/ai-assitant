@@ -1,202 +1,102 @@
 /**
- * src/engine/conversationEngine.js
- *
- * Goal:
- * - Script/slot-filling (NOT random AI)
- * - Never miss required details:
- *   - pizza name
- *   - size
- *   - qty (default 1)
- *   - spice (only if required by that pizza)
- *   - pickup/delivery
- *   - address if delivery
- * - Natural flow:
- *   - user can ask menu / veg options / sides anytime
- *   - user can change order mid-way
- *   - user can add sides even after confirmation prompt
- *
- * IMPORTANT:
- * - This file MUST NOT have "return" at top-level.
- * - All returns must be inside functions.
+ * conversationEngine.js (SAFE CLEAN VERSION)
+ * - Slot-filling script engine (no AI)
+ * - Handles: menu / veg options / sides list
+ * - Handles: add/change pizzas, add sides anytime, confirmation edits
+ * - Prevents spice-loop by using awaiting state properly
  */
 
-const ENGINE_VERSION = "1.0.1";
-
-/* =========================
-   TEXT HELPERS
-========================= */
-
-// Normalize (trim)
 function norm(text) {
   return String(text || "").trim();
 }
-
-// Lowercase normalized
 function lower(text) {
   return norm(text).toLowerCase();
 }
-
-// Check if text includes any phrase
 function hasAny(t, arr) {
   return arr.some((x) => t.includes(x));
 }
 
-// Detect "done" meanings
-function isDone(text) {
-  const t = lower(text);
-  return (
-    t === "done" ||
-    t === "finish" ||
-    t === "finished" ||
-    t.includes("that's all") ||
-    t.includes("thats all") ||
-    t.includes("nothing else") ||
-    t.includes("no more") ||
-    t.includes("all good")
-  );
-}
+/* =========================
+   BASIC INTENT HELPERS
+========================= */
 
-// Detect explicit "no sides"
-function isNoSides(text) {
-  const t = lower(text);
-  return hasAny(t, [
-    "no sides",
-    "no side",
-    "without sides",
-    "none",
-    "nothing",
-    "no thanks",
-    "dont want sides",
-    "don't want sides"
-  ]);
-}
-
-// Confirm YES
 function isConfirmYes(text) {
   const t = lower(text);
-  return (
-    t === "yes" ||
-    t === "y" ||
-    t === "yeah" ||
-    t === "yep" ||
-    t === "correct" ||
-    t === "right" ||
-    t.includes("confirm") ||
-    t.includes("that's right") ||
-    t.includes("that is right")
-  );
+  return /^(yes|y|yeah|yep|correct|right|confirm|ok)$/i.test(t) || t.includes("confirm");
 }
 
-// Confirm NO
 function isConfirmNo(text) {
   const t = lower(text);
-  return (
-    t === "no" ||
-    t === "nope" ||
-    t === "wrong" ||
-    t === "incorrect" ||
-    t.includes("not correct") ||
-    t.includes("change") ||
-    t.includes("edit")
-  );
+  return /^(no|nope|wrong|incorrect)$/i.test(t) || t.includes("change") || t.includes("not correct");
 }
 
-// Pickup vs Delivery
 function detectOrderType(text) {
   const t = lower(text);
-
-  if (/(pickup|pick\s*up|picup|carry\s*out|take\s*away)/i.test(t)) return "Pickup";
-  if (/(delivery|deliver|drop\s*off|dropoff)/i.test(t)) return "Delivery";
-
+  if (hasAny(t, ["pickup", "pick up", "picup", "carryout", "carry out", "takeaway", "take away"])) return "Pickup";
+  if (hasAny(t, ["delivery", "deliver", "drop off", "dropoff"])) return "Delivery";
   return null;
 }
 
-/**
- * Spice detection:
- * - Accepts "medium", "medium hot", "not spicy", "extra spicy"
- * - If multiple detected, returns "__AMBIGUOUS__"
- */
-function detectSpice(text) {
-  const t = lower(text);
-
-  const mild = /(mild|not spicy|low spicy|less spicy)/i.test(t);
-  const medium = /(medium|mid|medium spicy)/i.test(t);
-  const hot = /(hot|spicy|extra spicy|very spicy)/i.test(t);
-
-  const hits = [];
-  if (mild) hits.push("Mild");
-  if (medium) hits.push("Medium");
-  if (hot) hits.push("Hot");
-
-  if (hits.length === 1) return hits[0];
-  if (hits.length > 1) return "__AMBIGUOUS__";
-  return null;
+function looksLikeAddress(text) {
+  const s = norm(text);
+  const hasNumber = /\d+/.test(s);
+  const hasStreetWord = /(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|way|lane|ln|unit|apt|suite|#)/i.test(s);
+  return hasNumber && hasStreetWord;
 }
 
-// Size detection (word boundaries so it doesn't randomly match)
 function detectSize(text) {
   const t = lower(text);
-
-  if (/\blarge\b|\bl\b/.test(t)) return "Large";
-  if (/\bmedium\b|\bm\b/.test(t)) return "Medium";
-  if (/\bsmall\b|\bs\b/.test(t)) return "Small";
-
+  if (t.includes("large") || /\bl\b/.test(t)) return "Large";
+  if (t.includes("medium") || /\bm\b/.test(t)) return "Medium";
+  if (t.includes("small") || /\bs\b/.test(t)) return "Small";
   return null;
 }
 
-// Quantity detection (digits + a few words)
 function detectQty(text) {
   const t = lower(text);
-
   const m = t.match(/\b(\d+)\b/);
   if (m) {
     const n = parseInt(m[1], 10);
     if (!Number.isNaN(n) && n > 0 && n < 50) return n;
   }
-
-  // Word qty
-  if (/\bone\b|\ba\b|\ban\b/.test(t)) return 1;
-  if (/\btwo\b/.test(t)) return 2;
-  if (/\bthree\b/.test(t)) return 3;
-  if (/\bfour\b/.test(t)) return 4;
-  if (/\bfive\b/.test(t)) return 5;
-
+  if (t.includes("one ")) return 1;
+  if (t.includes("two ")) return 2;
+  if (t.includes("three ")) return 3;
   return null;
 }
 
-// User asking menu?
+/**
+ * Spice:
+ * - supports: mild, medium, hot
+ * - if user says "medium hot" => ambiguous
+ */
+function detectSpice(text) {
+  const t = lower(text);
+  const mild = hasAny(t, ["mild", "not spicy", "less spicy", "low spicy"]);
+  const medium = hasAny(t, ["medium", "mid", "medium spicy"]);
+  const hot = hasAny(t, ["hot", "spicy", "extra spicy", "very spicy"]);
+
+  const hits = [mild ? "Mild" : null, medium ? "Medium" : null, hot ? "Hot" : null].filter(Boolean);
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1) return "__AMBIGUOUS__";
+  return null;
+}
+
 function isAskingMenu(text) {
   const t = lower(text);
-  return hasAny(t, [
-    "menu",
-    "what pizzas",
-    "which pizzas",
-    "pizza options",
-    "pizza do you have",
-    "available pizzas",
-    "show menu",
-    "what do you have"
-  ]);
+  return hasAny(t, ["menu", "what pizzas", "which pizzas", "pizza options", "pizza do you have", "available pizzas", "show menu"]);
 }
-
-// User asking veg?
-function isAskingVegOptions(text) {
+function isAskingVeg(text) {
   const t = lower(text);
-  return hasAny(t, ["veg", "veggie options", "vegetarian", "vegetarian pizzas", "veg pizzas"]);
+  return hasAny(t, ["veg", "veggie", "vegetarian", "veg options", "vegetarian pizzas"]);
 }
-
-// User asking sides?
 function isAskingSides(text) {
   const t = lower(text);
-  return hasAny(t, ["sides", "side options", "what sides", "which sides", "addons", "add ons", "drinks", "what drinks"]);
+  return hasAny(t, ["sides", "side options", "what sides", "which sides", "drinks", "what drinks", "addons", "add ons"]);
 }
-
-// Heuristic: address
-function looksLikeAddress(text) {
-  const t = norm(text);
-  const hasNumber = /\d+/.test(t);
-  const hasStreetWord = /(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|way|lane|ln|unit|apt|suite|#)/i.test(t);
-  return hasNumber && hasStreetWord;
+function isNoSides(text) {
+  const t = lower(text);
+  return hasAny(t, ["no sides", "no side", "without sides", "none", "no thanks", "dont want sides", "don't want sides"]);
 }
 
 /* =========================
@@ -207,83 +107,6 @@ function safeArray(x) {
   return Array.isArray(x) ? x : [];
 }
 
-// Flatten pizzas from store.menu.pizzas = { category: [ {name,...}, ... ] }
-function getAllPizzaItems(store) {
-  const menu = store?.menu || {};
-  const pizzas = menu.pizzas || {};
-
-  const categories = Object.keys(pizzas);
-  const all = [];
-
-  for (const cat of categories) {
-    const arr = safeArray(pizzas[cat]);
-    for (const p of arr) {
-      all.push({
-        category: cat,
-        ...p
-      });
-    }
-  }
-
-  return all;
-}
-
-// Combine sides + beverages
-function getAllSideItems(store) {
-  const menu = store?.menu || {};
-  const sides = safeArray(menu.sides);
-  const beverages = safeArray(menu.beverages);
-  return [...sides, ...beverages];
-}
-
-// List formatting
-function formatList(names, max = 12) {
-  const list = names.slice(0, max);
-  const more = names.length > max ? ` (+${names.length - max} more)` : "";
-  return list.join(", ") + more;
-}
-
-// Menu text
-function listPizzasText(store) {
-  const all = getAllPizzaItems(store);
-  const names = all.map((p) => p.name);
-
-  if (!names.length) {
-    return "Menu is not loaded for this store yet. Please add pizzas inside the store JSON (store.menu.pizzas).";
-  }
-
-  return `Here are our pizzas: ${formatList(names, 20)}. Example: “2 large butter chicken pizzas” or “1 medium garden fresh”.`;
-}
-
-// Veg menu text
-function listVegPizzasText(store) {
-  const all = getAllPizzaItems(store);
-  const veg = all.filter((p) => p.veg === true).map((p) => p.name);
-
-  if (!veg.length) {
-    return "I don’t see vegetarian pizzas listed for this store right now. Ask “menu” to hear everything.";
-  }
-
-  return `Vegetarian options: ${formatList(veg, 20)}.`;
-}
-
-// Sides text
-function listSidesText(store) {
-  const all = getAllSideItems(store);
-  const names = all.map((s) => s.name);
-
-  if (!names.length) {
-    return "This store has no sides/drinks configured yet in store.menu.sides / store.menu.beverages.";
-  }
-
-  return `Sides/drinks available: ${formatList(names, 20)}.`;
-}
-
-/* =========================
-   MATCHING USER TEXT → MENU
-========================= */
-
-// Normalize string for matching
 function normalizeForMatch(s) {
   return lower(s)
     .replace(/['"]/g, "")
@@ -292,101 +115,118 @@ function normalizeForMatch(s) {
     .trim();
 }
 
-// Build pizza index + aliases
-function buildPizzaIndex(store) {
-  const all = getAllPizzaItems(store);
+function getAllPizzas(store) {
+  const menu = store?.menu || {};
+  const pizzasByCat = menu.pizzas || {};
+  const out = [];
+  for (const cat of Object.keys(pizzasByCat)) {
+    for (const p of safeArray(pizzasByCat[cat])) {
+      out.push({ category: cat, ...p });
+    }
+  }
+  return out;
+}
 
+function getAllSides(store) {
+  const menu = store?.menu || {};
+  const sides = safeArray(menu.sides);
+  const beverages = safeArray(menu.beverages);
+  return [...sides, ...beverages];
+}
+
+function listText(names, max = 20) {
+  const show = names.slice(0, max);
+  const more = names.length > max ? ` (+${names.length - max} more)` : "";
+  return show.join(", ") + more;
+}
+
+function listMenuReply(store) {
+  const pizzas = getAllPizzas(store).map((p) => p.name);
+  if (!pizzas.length) return "Menu is not configured for this store yet.";
+  return `Here are our pizzas: ${listText(pizzas)}.`;
+}
+
+function listVegReply(store) {
+  const veg = getAllPizzas(store).filter((p) => p.veg === true).map((p) => p.name);
+  if (!veg.length) return "I don’t see vegetarian pizzas listed for this store right now.";
+  return `Vegetarian options: ${listText(veg)}.`;
+}
+
+function listSidesReply(store) {
+  const sides = getAllSides(store).map((s) => s.name);
+  if (!sides.length) return "Sides/drinks are not configured for this store yet.";
+  return `Sides/drinks available: ${listText(sides)}.`;
+}
+
+/* =========================
+   EXTRACT ITEMS FROM TEXT
+========================= */
+
+function buildPizzaIndex(store) {
+  const all = getAllPizzas(store);
   return all.map((p) => {
     const base = normalizeForMatch(p.name);
     const noPizza = base.replace(/\bpizza\b/g, "").trim();
-
-    const aliases = [base, noPizza];
-
-    // Include store-defined aliases if present
-    for (const a of safeArray(p.aliases)) {
-      aliases.push(normalizeForMatch(a));
-    }
-
-    const uniq = Array.from(new Set(aliases.filter(Boolean)));
-
-    return {
-      ...p,
-      _aliases: uniq
-    };
+    const aliases = [base, noPizza, ...safeArray(p.aliases).map(normalizeForMatch)].filter(Boolean);
+    return { ...p, _aliases: Array.from(new Set(aliases)) };
   });
 }
 
-// Extract pizzas mentioned in user text
 function extractPizzasFromText(store, text) {
   const t = normalizeForMatch(text);
-  const pizzas = buildPizzaIndex(store);
+  const idx = buildPizzaIndex(store);
 
   const found = [];
-
-  for (const p of pizzas) {
+  for (const p of idx) {
     const hit = p._aliases.some((a) => a && t.includes(a));
     if (!hit) continue;
 
-    // Qty/size from same message
-    const qty = detectQty(text) || 1;
-    const size = detectSize(text) || null;
-
     found.push({
       name: p.name,
-      category: p.category,
-      qty,
-      size,
+      qty: detectQty(text) || 1,
+      size: detectSize(text) || null,
       spice: null,
-      requiresSpice: p.requiresSpice === true,
-      veg: p.veg === true
+      requiresSpice: p.requiresSpice === true
     });
   }
 
-  // Merge duplicates (same name + size)
+  // merge duplicates
   const merged = [];
-  for (const item of found) {
-    const existing = merged.find((x) => x.name === item.name && x.size === item.size);
-    if (existing) existing.qty += item.qty;
-    else merged.push(item);
+  for (const it of found) {
+    const existing = merged.find((x) => x.name === it.name && x.size === it.size);
+    if (existing) existing.qty += it.qty;
+    else merged.push(it);
   }
 
   return merged;
 }
 
-// Extract sides mentioned in user text
 function extractSidesFromText(store, text) {
   const t = normalizeForMatch(text);
-  const sideItems = getAllSideItems(store);
+  const all = getAllSides(store);
 
   const found = [];
-  for (const s of sideItems) {
-    const aliases = [
-      normalizeForMatch(s.name),
-      ...safeArray(s.aliases).map(normalizeForMatch)
-    ].filter(Boolean);
-
+  for (const s of all) {
+    const aliases = [normalizeForMatch(s.name), ...safeArray(s.aliases).map(normalizeForMatch)].filter(Boolean);
     const hit = aliases.some((a) => a && t.includes(a));
     if (!hit) continue;
 
-    found.push({
-      name: s.name,
-      qty: detectQty(text) || 1
-    });
+    found.push({ name: s.name, qty: detectQty(text) || 1 });
   }
 
-  // Merge by name
+  // merge duplicates
   const merged = [];
-  for (const item of found) {
-    const existing = merged.find((x) => x.name === item.name);
-    if (existing) existing.qty += item.qty;
-    else merged.push(item);
+  for (const it of found) {
+    const existing = merged.find((x) => x.name === it.name);
+    if (existing) existing.qty += it.qty;
+    else merged.push(it);
   }
 
   return merged;
 }
 
 /* =========================
-   EXPORTED: GREETING
+   PUBLIC API
 ========================= */
 
 export function getGreetingText(store) {
@@ -396,332 +236,164 @@ export function getGreetingText(store) {
   );
 }
 
-/* =========================
-   EXPORTED: CONFIRMATION TEXT
-========================= */
-
 export function buildConfirmationText(store, session) {
   const orderType = session.orderType || "Pickup";
 
-  // Build pizza lines
-  const itemsText = session.items.length
-    ? session.items
-        .map((it, idx) => {
-          const qty = it.qty || 1;
-          const size = it.size ? `${it.size}` : "";
-          const spice = it.spice ? ` (${it.spice})` : "";
-          return `${idx + 1}. ${qty} ${size} ${it.name}${spice}`.replace(/\s+/g, " ").trim();
-        })
-        .join(". ")
-    : "No pizzas selected";
+  const pizzas =
+    session.items?.length
+      ? session.items
+          .map((it, i) => {
+            const qty = it.qty || 1;
+            const size = it.size ? it.size : "";
+            const spice = it.spice ? ` (${it.spice})` : "";
+            return `${i + 1}. ${qty} ${size} ${it.name}${spice}`.replace(/\s+/g, " ").trim();
+          })
+          .join(". ")
+      : "No pizzas";
 
-  // Build sides line
-  const sidesText = session.sides.length
-    ? session.sides
-        .map((s) => `${s.qty || 1} ${s.name}`.replace(/\s+/g, " ").trim())
-        .join(", ")
-    : "No sides";
+  const sides =
+    session.sides?.length
+      ? session.sides.map((s) => `${s.qty || 1} ${s.name}`.replace(/\s+/g, " ").trim()).join(", ")
+      : "No sides";
 
-  // Address only if delivery
-  const addressText =
-    orderType === "Delivery"
-      ? session.address
-        ? ` Delivery address: ${session.address}.`
-        : " Delivery address: (missing)."
-      : "";
+  const addressPart =
+    orderType === "Delivery" ? ` Delivery address: ${session.address || "(missing)"}.` : "";
 
-  return `Please confirm your order. Order type: ${orderType}.${addressText} ${itemsText}. Sides: ${sidesText}. Is that correct?`;
+  return `Please confirm your order. Order type: ${orderType}.${addressPart} ${pizzas}. Sides: ${sides}. Is that correct?`;
 }
-
-/* =========================
-   EXPORTED: HANDLE USER TURN
-========================= */
 
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  // If store missing
-  if (!store) {
-    return { reply: "Sorry — I can’t find that store right now.", session };
-  }
+  // menu / veg / sides questions anytime
+  if (isAskingMenu(text)) return { reply: listMenuReply(store), session };
+  if (isAskingVeg(text)) return { reply: listVegReply(store), session };
+  if (isAskingSides(text)) return { reply: listSidesReply(store), session };
 
-  // Always allow menu questions anytime (do NOT break the session)
-  if (isAskingMenu(text)) {
-    // Keep the session as-is; just answer
-    return { reply: listPizzasText(store), session };
-  }
-
-  if (isAskingVegOptions(text)) {
-    return { reply: listVegPizzasText(store), session };
-  }
-
-  if (isAskingSides(text)) {
-    // If sides not configured, we still answer truthfully
-    const msg = listSidesText(store);
-
-    // If we were in the "ask sides" phase, follow with a prompt
-    if (!session.sidesDone) {
-      return { reply: `${msg} You can say: “add coke” or “no sides”.`, session };
-    }
-
-    return { reply: msg, session };
-  }
-
-  /**
-   * If we are currently in confirmation stage:
-   * - YES completes
-   * - NO exits confirmation and allows edits
-   * - Any other message is treated like an edit (add sides, change pizza, etc.)
-   */
+  // If confirming: accept yes/no or treat as edits
   if (session.confirming) {
     if (isConfirmYes(text)) {
       session.completed = true;
       return { reply: "Perfect — your order is confirmed. Thank you!", session };
     }
-
     if (isConfirmNo(text)) {
       session.confirming = false;
       session.awaiting = null;
-      return {
-        reply: "No problem — what would you like to change? (pizza, size, spice, sides, pickup/delivery)",
-        session
-      };
+      return { reply: "No problem — what would you like to change?", session };
     }
-
-    // Treat anything else as an edit
+    // treat anything else as an edit request
     session.confirming = false;
   }
 
-  /* =========================
-     1) Resolve awaited slot FIRST
-     (but: if user clearly gives a NEW pizza in the same message,
-     we will treat it as change, not as an answer to the old question)
-  ========================= */
-
-  // If awaiting something, but user mentions pizzas in same message,
-  // we should allow changing order instead of forcing loop.
-  const pizzasMentionedNow = extractPizzasFromText(store, text);
-  const strongChangeSignal = hasAny(lower(text), ["change", "actually", "instead", "replace", "no i want", "no, i want"]);
-
-  if (session.awaiting && pizzasMentionedNow.length && strongChangeSignal) {
-    // Clear awaiting because user is changing order
+  // 1) resolve awaited slot
+  if (session.awaiting?.type === "orderType") {
+    const ot = detectOrderType(text);
+    if (!ot) return { reply: "Pickup or delivery?", session };
+    session.orderType = ot;
     session.awaiting = null;
   }
 
-  // Awaiting pickup/delivery
-  if (session.awaiting?.type === "orderType") {
-    const ot = detectOrderType(text);
-    if (ot) {
-      session.orderType = ot;
-      session.awaiting = null;
-    } else {
-      return { reply: "Pickup or delivery?", session };
-    }
-  }
-
-  // Awaiting address
   if (session.awaiting?.type === "address") {
-    if (looksLikeAddress(text)) {
-      session.address = text;
-      session.awaiting = null;
-    } else {
+    if (!looksLikeAddress(text)) {
       return { reply: "Please tell me the delivery address (example: 123 Main St, Surrey).", session };
     }
+    session.address = text;
+    session.awaiting = null;
   }
 
-  // Awaiting size for an item
   if (session.awaiting?.type === "size") {
-    const idx = session.awaiting.itemIndex;
+    const i = session.awaiting.itemIndex;
     const size = detectSize(text);
-
-    if (size && session.items[idx]) {
-      session.items[idx].size = size;
-      session.awaiting = null;
-    } else {
-      return { reply: "What size would you like? Small, Medium, or Large?", session };
-    }
+    if (!size) return { reply: "What size would you like? Small, Medium, or Large?", session };
+    if (session.items?.[i]) session.items[i].size = size;
+    session.awaiting = null;
   }
 
-  // Awaiting spice for an item
   if (session.awaiting?.type === "spice") {
-    const idx = session.awaiting.itemIndex;
+    const i = session.awaiting.itemIndex;
     const spice = detectSpice(text);
 
     if (spice === "__AMBIGUOUS__") {
-      return { reply: "Got it — please choose ONE spice level: Mild, Medium, or Hot.", session };
+      return { reply: "Please choose ONE spice level: Mild, Medium, or Hot.", session };
     }
-
-    if (spice && session.items[idx]) {
-      session.items[idx].spice = spice;
-      session.awaiting = null;
-    } else {
-      return { reply: "What spice level would you like? Mild, Medium, or Hot?", session };
-    }
+    if (!spice) return { reply: "What spice level would you like? Mild, Medium, or Hot?", session };
+    if (session.items?.[i]) session.items[i].spice = spice;
+    session.awaiting = null;
   }
 
-  /* =========================
-     2) Merge free-text info
-  ========================= */
+  // 2) merge info from free text anytime
+  const ot = detectOrderType(text);
+  if (ot) session.orderType = ot;
 
-  // Order type can appear anytime
-  const orderType = detectOrderType(text);
-  if (orderType) session.orderType = orderType;
-
-  // If user says "delivery" and gives an address in the same message
-  if (session.orderType === "Delivery" && !session.address && looksLikeAddress(text)) {
-    session.address = text;
-  }
-
-  // Sides can appear anytime
-  const extractedSides = extractSidesFromText(store, text);
-  if (extractedSides.length) {
-    for (const s of extractedSides) {
-      const existing = session.sides.find((x) => x.name === s.name);
-      if (existing) existing.qty += s.qty || 1;
-      else session.sides.push({ name: s.name, qty: s.qty || 1 });
-    }
-    // If they added sides, consider sides question handled
-    session.sidesDone = true;
-  }
-
-  // Explicit "no sides"
+  // sides
   if (isNoSides(text)) {
     session.sides = [];
     session.sidesDone = true;
+  } else {
+    const sides = extractSidesFromText(store, text);
+    if (sides.length) {
+      session.sides = session.sides || [];
+      for (const s of sides) {
+        const ex = session.sides.find((x) => x.name === s.name);
+        if (ex) ex.qty += s.qty || 1;
+        else session.sides.push({ name: s.name, qty: s.qty || 1 });
+      }
+    }
   }
 
-  // Pizzas from text
-  const extractedPizzas = pizzasMentionedNow.length ? pizzasMentionedNow : extractPizzasFromText(store, text);
-
-  // If user signals change, replace pizzas
-  const changingOrder = strongChangeSignal;
-
-  if (extractedPizzas.length) {
-    if (changingOrder || session.items.length === 0) {
-      session.items = extractedPizzas.map((p) => ({
-        name: p.name,
-        qty: p.qty || 1,
-        size: p.size || null,
-        spice: null,
-        requiresSpice: p.requiresSpice === true
-      }));
+  // pizzas
+  const pizzas = extractPizzasFromText(store, text);
+  const changing = hasAny(lower(text), ["change", "actually", "instead", "replace", "no i want"]);
+  if (pizzas.length) {
+    session.items = session.items || [];
+    if (changing || session.items.length === 0) {
+      session.items = pizzas;
     } else {
-      // Merge into existing items
-      for (const p of extractedPizzas) {
-        const existing = session.items.find((x) => x.name === p.name && x.size === p.size);
-        if (existing) existing.qty += p.qty || 1;
-        else {
-          session.items.push({
-            name: p.name,
-            qty: p.qty || 1,
-            size: p.size || null,
-            spice: null,
-            requiresSpice: p.requiresSpice === true
-          });
-        }
+      for (const p of pizzas) {
+        const ex = session.items.find((x) => x.name === p.name && x.size === p.size);
+        if (ex) ex.qty += p.qty || 1;
+        else session.items.push(p);
       }
     }
   }
 
-  // If user provides size alone and we have exactly 1 pizza missing size,
-  // fill it automatically (prevents size loops).
-  if (!extractedPizzas.length) {
-    const sizeOnly = detectSize(text);
-    if (sizeOnly) {
-      const missingSizeIndexes = session.items
-        .map((it, i) => ({ it, i }))
-        .filter((x) => !x.it.size);
-
-      if (missingSizeIndexes.length === 1) {
-        session.items[missingSizeIndexes[0].i].size = sizeOnly;
-      }
-    }
+  // 3) slot filling
+  if (!session.items || session.items.length === 0) {
+    return { reply: "What would you like to order? (You can also ask: menu)", session };
   }
 
-  // If user provides spice alone and we have exactly 1 pizza missing spice,
-  // fill it automatically (prevents spice loops).
-  const spiceOnly = detectSpice(text);
-  if (spiceOnly && spiceOnly !== "__AMBIGUOUS__") {
-    const missingSpiceIndexes = session.items
-      .map((it, i) => ({ it, i }))
-      .filter((x) => x.it.requiresSpice && !x.it.spice);
-
-    if (missingSpiceIndexes.length === 1) {
-      session.items[missingSpiceIndexes[0].i].spice = spiceOnly;
-    }
-  }
-
-  /* =========================
-     3) Next required question
-  ========================= */
-
-  // Must have at least 1 pizza
-  if (!session.items.length) {
-    return {
-      reply: "What would you like to order? (You can say: “2 large butter chicken pizzas” or ask “menu”.)",
-      session
-    };
-  }
-
-  // Ensure every pizza has size
   for (let i = 0; i < session.items.length; i++) {
     if (!session.items[i].size) {
       session.awaiting = { type: "size", itemIndex: i };
-      return {
-        reply: `What size would you like for ${session.items[i].name}? Small, Medium, or Large?`,
-        session
-      };
+      return { reply: `What size would you like for ${session.items[i].name}? Small, Medium, or Large?`, session };
     }
   }
 
-  // Ensure spice for pizzas that require it
   for (let i = 0; i < session.items.length; i++) {
     if (session.items[i].requiresSpice && !session.items[i].spice) {
       session.awaiting = { type: "spice", itemIndex: i };
-      return {
-        reply: `What spice level for ${session.items[i].name}? Mild, Medium, or Hot?`,
-        session
-      };
+      return { reply: `What spice level for ${session.items[i].name}? Mild, Medium, or Hot?`, session };
     }
   }
 
-  // Ensure pickup/delivery
   if (!session.orderType) {
     session.awaiting = { type: "orderType" };
     return { reply: "Pickup or delivery?", session };
   }
 
-  // If delivery, ensure address
   if (session.orderType === "Delivery" && !session.address) {
     session.awaiting = { type: "address" };
     return { reply: "What’s the delivery address?", session };
   }
 
-  // Ask sides once (only if sides exist in store config)
-  const storeSidesCount = getAllSideItems(store).length;
-
-  if (!session.sidesDone && session.sides.length === 0) {
-    // If store has no sides configured, don't loop — just skip.
-    if (storeSidesCount === 0) {
-      session.sidesDone = true;
-    } else {
-      // If user says done here, treat as no sides
-      if (isDone(text)) {
-        session.sidesDone = true;
-      } else {
-        return {
-          reply:
-            "Would you like any sides or drinks? You can say: “add coke” or “no sides”. (You can also ask: “which sides are available?”)",
-          session
-        };
-      }
-    }
+  if (!session.sidesDone && (!session.sides || session.sides.length === 0)) {
+    return { reply: "Would you like any sides or drinks? (You can say: add coke / no sides / which sides are available)", session };
   }
 
-  // Final confirmation
   session.confirming = true;
   return { reply: buildConfirmationText(store, session), session };
 }
+
 
 // /* =========================================================
 //    engine/conversationEngine.js
