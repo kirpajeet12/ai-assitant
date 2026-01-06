@@ -1,28 +1,34 @@
-
-
 /**
- * index.js
- * - Twilio voice webhook endpoints
- * - Web chat test endpoints (/api/chat/start, /api/chat/message)
- * - Uses the SAME conversation engine for both (so behavior matches)
+ * src/index.js
  *
- * NOTE:
- * - ESM module style (import ...)
- * - Requires your existing storeService + ticketService
+ * What this file does:
+ * 1) Twilio Voice endpoints:
+ *    - POST /twilio/voice  (call starts)
+ *    - POST /twilio/step   (each user speech turn)
+ * 2) Web chat testing endpoints:
+ *    - POST /api/chat/start
+ *    - POST /api/chat/message
+ * 3) Dashboard static hosting:
+ *    - /dashboard/*
+ *
+ * IMPORTANT:
+ * - Both voice + web chat use the SAME conversation engine.
+ * - That means behavior is consistent during testing.
  */
 
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import path from "path";
-import twilio from "twilio";
-import { fileURLToPath } from "url";
-import crypto from "crypto";
+import "dotenv/config"; // Loads .env variables
+import express from "express"; // Web server
+import cors from "cors"; // Allow cross-origin calls
+import path from "path"; // Paths
+import twilio from "twilio"; // Twilio helper to build TwiML
+import { fileURLToPath } from "url"; // For __dirname in ESM
+import crypto from "crypto"; // Create random chat session ids
 
+// Your services
 import { getStoreByPhone } from "./services/storeService.js";
 import { createTicket, getTicketsByStore } from "./services/ticketService.js";
 
-// ✅ Our new engine (script/slot-filling, no loops)
+// Our engine (script/slot-filling)
 import {
   getGreetingText,
   handleUserTurn,
@@ -33,28 +39,26 @@ import {
    BASIC SETUP
 ========================= */
 
-// ✅ Resolve __dirname in ESM
+// ESM-safe __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ Create express app
+// Create express app
 const app = express();
 
-// ✅ CORS for local testing / dashboard
+// Allow local testing + dashboard access
 app.use(cors());
 
-// ✅ Twilio sends urlencoded form bodies (Voice webhooks)
+// Twilio sends URL-encoded body
 app.use(express.urlencoded({ extended: false }));
 
-// ✅ Our dashboard/chat use JSON
+// Dashboard/chat uses JSON
 app.use(express.json());
 
-// ✅ Serve dashboard static files (your existing folder)
+// Static dashboard folder
 app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
 
-// ✅ (Optional) You can serve chat.html directly if you want:
-// Place chat.html inside dashboard folder and open /dashboard/chat.html
-
+// Port from Render (or local)
 const PORT = process.env.PORT || 10000;
 
 /* =========================
@@ -62,78 +66,115 @@ const PORT = process.env.PORT || 10000;
 ========================= */
 
 /**
- * Voice sessions keyed by CallSid
- * Chat sessions keyed by sessionId
+ * Voice sessions:
+ * - key: CallSid
+ * - value: session object
  */
 const voiceSessions = new Map();
+
+/**
+ * Chat sessions:
+ * - key: sessionId
+ * - value: { store, session }
+ */
 const chatSessions = new Map();
 
 /**
- * Default store phone used when chat test does not provide storePhone.
- * Put your store number in .env as DEFAULT_STORE_PHONE if you want:
- * DEFAULT_STORE_PHONE=+16045073330
+ * Default store phone for chat testing
+ * - if user leaves storePhone empty in chat UI, we use this.
  */
-const DEFAULT_STORE_PHONE = process.env.DEFAULT_STORE_PHONE || "+16045073330";
+const DEFAULT_STORE_PHONE = (process.env.DEFAULT_STORE_PHONE || "").trim();
 
 /* =========================
-   STORE HELPERS
+   PHONE NORMALIZATION
 ========================= */
 
 /**
- * Get store by phone.
- * - Voice: Twilio sends req.body.To
- * - Chat: we pass storePhone from UI (or default)
+ * Normalize phone so your store lookup works more reliably.
+ * Example:
+ * - "+1 (604) 123-4567" -> "+16041234567"
+ * - "16041234567"       -> "+16041234567" (if looks like NA number)
  */
+function normalizePhone(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+
+  // Keep digits + leading plus
+  const digits = raw.replace(/[^\d+]/g, "");
+
+  // If it already starts with + and has digits, keep it
+  if (digits.startsWith("+")) return digits;
+
+  // If it looks like 11 digits starting with 1, treat as +1...
+  if (/^1\d{10}$/.test(digits)) return `+${digits}`;
+
+  // If it looks like 10 digits, treat as North America +1
+  if (/^\d{10}$/.test(digits)) return `+1${digits}`;
+
+  // Otherwise just return digits (better than nothing)
+  return digits;
+}
+
+/* =========================
+   STORE LOOKUP
+========================= */
+
 function safeGetStoreByPhone(phoneMaybe) {
-  const phone = (phoneMaybe || "").trim() || DEFAULT_STORE_PHONE;
+  // Use provided phone if present; else fallback to DEFAULT_STORE_PHONE
+  const phone = normalizePhone(phoneMaybe) || normalizePhone(DEFAULT_STORE_PHONE);
+
+  // If still empty, we cannot lookup
+  if (!phone) return null;
+
+  // Your storeService should match based on phone
   return getStoreByPhone(phone);
 }
 
 /* =========================
-   TWILIO ENTRY POINT
+   TWILIO: CALL START
 ========================= */
 
 app.post("/twilio/voice", (req, res) => {
-  // ✅ Twilio hits this when call starts
-  const store = safeGetStoreByPhone(req.body.To);
+  // Twilio usually provides To/From/CallSid
+  const toPhone = req.body.To; // store number
+  const fromPhone = req.body.From; // caller
+  const callSid = req.body.CallSid; // unique call id
 
-  // ✅ If store not found, still answer gracefully
+  // Find store config
+  const store = safeGetStoreByPhone(toPhone);
+
+  // Build TwiML response
   const twiml = new twilio.twiml.VoiceResponse();
 
-  // ✅ Create a session for this call
-  const callSid = req.body.CallSid;
-
+  // Create voice session if store is found
   if (store && !voiceSessions.has(callSid)) {
     voiceSessions.set(callSid, {
-      // Store metadata
       store_id: store.id,
-      store_phone: req.body.To,
-
-      // Caller
-      caller: req.body.From,
+      store_phone: normalizePhone(toPhone),
+      caller: normalizePhone(fromPhone),
 
       // Order state
-      orderType: null,         // Pickup / Delivery
-      address: null,           // required if Delivery
-      customerName: null,      // optional slot if you want later
-
-      items: [],               // [{name, qty, size, spice}]
-      sides: [],               // [{name, qty}]
+      orderType: null,     // "Pickup" | "Delivery"
+      address: null,       // required for delivery
+      customerName: null,  // optional
+      items: [],           // pizzas
+      sides: [],           // sides/drinks
 
       // Flow control
-      awaiting: null,          // { type, itemIndex? }
-      confirming: false,       // true when confirmation question is asked
-      completed: false         // true when order is confirmed
+      awaiting: null,      // e.g. { type: "size", itemIndex: 0 }
+      confirming: false,   // true when we are asking final confirm
+      completed: false     // true after confirmed
     });
   }
 
-  // ✅ Greeting text (from store JSON if present, else default)
-  const greeting = getGreetingText(store);
+  // If store not found, still respond gracefully
+  const greeting = store
+    ? getGreetingText(store)
+    : "Hi! This store is not configured yet. Please contact the shop owner.";
 
-  // ✅ Say greeting
   twiml.say({ voice: "alice", language: "en-CA" }, greeting);
 
-  // ✅ Gather speech and send to /twilio/step
+  // Gather speech
   twiml.gather({
     input: "speech",
     language: "en-CA",
@@ -142,28 +183,31 @@ app.post("/twilio/voice", (req, res) => {
     method: "POST"
   });
 
-  // ✅ Return XML
-  res.type("text/xml").send(twiml.toString());
+  return res.type("text/xml").send(twiml.toString());
 });
 
 /* =========================
-   TWILIO STEP
+   TWILIO: STEP
 ========================= */
 
-app.post("/twilio/step", async (req, res) => {
+app.post("/twilio/step", (req, res) => {
   try {
-    const store = safeGetStoreByPhone(req.body.To);
-    if (!store) return res.sendStatus(404);
-
+    const toPhone = req.body.To;
+    const fromPhone = req.body.From;
     const callSid = req.body.CallSid;
-    const speech = (req.body.SpeechResult || "").trim();
 
-    // ✅ Ensure session exists
+    const store = safeGetStoreByPhone(toPhone);
+    if (!store) {
+      // Store config missing
+      return twilioRespond(res, "Sorry, this store is not configured yet.");
+    }
+
+    // Ensure session exists
     if (!voiceSessions.has(callSid)) {
       voiceSessions.set(callSid, {
         store_id: store.id,
-        store_phone: req.body.To,
-        caller: req.body.From,
+        store_phone: normalizePhone(toPhone),
+        caller: normalizePhone(fromPhone),
         orderType: null,
         address: null,
         customerName: null,
@@ -177,20 +221,21 @@ app.post("/twilio/step", async (req, res) => {
 
     const session = voiceSessions.get(callSid);
 
-    // ✅ Silence protection (don’t loop weirdly)
+    // User speech
+    const speech = String(req.body.SpeechResult || "").trim();
+
+    // If no speech, ask again
     if (!speech) {
       return twilioRespond(res, "Sorry, I didn’t catch that. Please say it again.");
     }
 
-    // ✅ Use our engine to process user turn
+    // Pass turn into engine
     const result = handleUserTurn(store, session, speech);
 
-    // ✅ If engine says order is completed, create ticket then hang up
+    // If order is completed, create ticket and hang up
     if (result.session.completed) {
-      // Build confirmation summary for saving
       const summary = buildConfirmationText(store, result.session);
 
-      // Save ticket
       createTicket({
         store_id: store.id,
         caller: session.caller,
@@ -204,47 +249,49 @@ app.post("/twilio/step", async (req, res) => {
       // Cleanup memory
       voiceSessions.delete(callSid);
 
-      // Say goodbye and hang up
+      // Say final message and hang up
       const twiml = new twilio.twiml.VoiceResponse();
       twiml.say({ voice: "alice", language: "en-CA" }, result.reply || "Perfect — your order is confirmed. Thank you!");
       twiml.hangup();
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ✅ Normal response (continue gathering)
+    // Continue the call
     return twilioRespond(res, result.reply);
 
   } catch (err) {
     console.error("❌ Twilio step error:", err);
-
     const twiml = new twilio.twiml.VoiceResponse();
     twiml.say({ voice: "alice", language: "en-CA" }, "Sorry, something went wrong. Please try again.");
     twiml.hangup();
-    res.type("text/xml").send(twiml.toString());
+    return res.type("text/xml").send(twiml.toString());
   }
 });
 
 /* =========================
-   WEB CHAT TEST API
+   WEB CHAT: START
 ========================= */
 
-/**
- * POST /api/chat/start
- * body: { storePhone?: string, from?: string }
- * returns: { sessionId, message }
- */
 app.post("/api/chat/start", (req, res) => {
-  const store = safeGetStoreByPhone(req.body.storePhone);
-  if (!store) return res.status(404).json({ error: "Store not found for that phone." });
+  // Store phone can be typed in UI; if empty, fallback to env default
+  const storePhone = normalizePhone(req.body.storePhone) || normalizePhone(DEFAULT_STORE_PHONE);
 
-  // ✅ Create random session id
+  const store = safeGetStoreByPhone(storePhone);
+  if (!store) {
+    return res.status(404).json({
+      error:
+        "Store not found. Put the correct store phone in the chat box or set DEFAULT_STORE_PHONE in .env."
+    });
+  }
+
+  // Make sessionId
   const sessionId = crypto.randomBytes(16).toString("hex");
 
-  // ✅ New session state (same structure as voice)
+  // New chat session state
   const session = {
     store_id: store.id,
-    store_phone: (req.body.storePhone || DEFAULT_STORE_PHONE),
-    caller: req.body.from || "web-user",
+    store_phone: storePhone,
+    caller: String(req.body.from || "web-user"),
     orderType: null,
     address: null,
     customerName: null,
@@ -263,26 +310,27 @@ app.post("/api/chat/start", (req, res) => {
   });
 });
 
-/**
- * POST /api/chat/message
- * body: { sessionId: string, text: string }
- * returns: { message }
- */
+/* =========================
+   WEB CHAT: MESSAGE
+========================= */
+
 app.post("/api/chat/message", (req, res) => {
-  const { sessionId, text } = req.body || {};
+  const sessionId = String(req.body.sessionId || "");
+  const text = String(req.body.text || "").trim();
+
   if (!sessionId || !chatSessions.has(sessionId)) {
     return res.status(400).json({ error: "Invalid sessionId. Click Start again." });
+  }
+  if (!text) {
+    return res.status(400).json({ error: "Empty message." });
   }
 
   const payload = chatSessions.get(sessionId);
   const { store, session } = payload;
 
-  const userText = String(text || "").trim();
-  if (!userText) return res.status(400).json({ error: "Empty message." });
+  const result = handleUserTurn(store, session, text);
 
-  const result = handleUserTurn(store, session, userText);
-
-  // ✅ If completed, save ticket then close chat session
+  // If completed, create ticket and close chat session
   if (result.session.completed) {
     const summary = buildConfirmationText(store, result.session);
 
@@ -298,7 +346,9 @@ app.post("/api/chat/message", (req, res) => {
 
     chatSessions.delete(sessionId);
 
-    return res.json({ message: result.reply || "Perfect — your order is confirmed. Thank you!" });
+    return res.json({
+      message: result.reply || "Perfect — your order is confirmed. Thank you!"
+    });
   }
 
   return res.json({ message: result.reply });
@@ -309,20 +359,18 @@ app.post("/api/chat/message", (req, res) => {
 ========================= */
 
 app.get("/api/stores/:id/tickets", (req, res) => {
-  res.json(getTicketsByStore(req.params.id));
+  return res.json(getTicketsByStore(req.params.id));
 });
 
 /* =========================
-   TWILIO XML RESPONDER
+   TWILIO HELPER
 ========================= */
 
 function twilioRespond(res, text) {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  // ✅ Say response
   twiml.say({ voice: "alice", language: "en-CA" }, text);
 
-  // ✅ Gather next speech
   twiml.gather({
     input: "speech",
     language: "en-CA",
@@ -335,13 +383,12 @@ function twilioRespond(res, text) {
 }
 
 /* =========================
-   SERVER
+   START SERVER
 ========================= */
 
 app.listen(PORT, () => {
   console.log("🚀 Store AI running on port", PORT);
 });
-
 
 // /**
 //  * index.js
