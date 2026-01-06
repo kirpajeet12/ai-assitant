@@ -1,108 +1,84 @@
-/**
- * src/index.js
- * - Twilio Voice webhook + Web Chat test API + Dashboard static hosting
- * - Fixes: sides/menu missing, "no sides" loop, "add coke" at confirmation
- */
+/* ===================================================================
+   index.js  (SCRIPT-BASED CHECKLIST BOT)
+   - Twilio Voice (/twilio/voice + /twilio/step)
+   - Web Chat Tester (/chat.html + /api/chat/start + /api/chat/message)
+   - Deterministic slot-filling so it never misses size/qty/etc.
+=================================================================== */
 
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import path from "path";
-import twilio from "twilio";
-import { fileURLToPath } from "url";
-import crypto from "crypto";
+import "dotenv/config"; // Loads .env values into process.env
+import express from "express"; // Web server
+import cors from "cors"; // Allow cross-origin requests (dashboard/chat)
+import path from "path"; // Safe path handling
+import twilio from "twilio"; // Twilio TwiML builder
+import { fileURLToPath } from "url"; // Needed for __dirname in ESM
 
-import { getStoreByPhone } from "./services/storeService.js";
-import { extractMeaning } from "./services/aiService.js";
-import { createTicket, getTicketsByStore } from "./services/ticketService.js";
-
-// Safe import (prevents Render crash if named export missing)
-import * as conversationEngine from "./engine/conversationEngine.js";
+// Your existing services (keep as-is)
+import { getStoreByPhone } from "./services/storeService.js"; // Looks up store config using phone number
+import { extractMeaning } from "./services/aiService.js"; // Optional: AI to parse free text into structured intent
+import { createTicket, getTicketsByStore } from "./services/ticketService.js"; // Ticket storage (json/in-memory/etc.)
 
 /* =========================
    BASIC SETUP
 ========================= */
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __filename = fileURLToPath(import.meta.url); // Current file path
+const __dirname = path.dirname(__filename); // Folder of this file
 
-const app = express();
-app.use(cors());
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+const app = express(); // Create Express app
+app.use(cors()); // Enable CORS
+app.use(express.urlencoded({ extended: false })); // Parse form bodies (Twilio sends urlencoded)
+app.use(express.json()); // Parse JSON bodies (web chat uses JSON)
 
-// Serve dashboard both ways:
-// - /dashboard/chat.html
-// - /chat.html
+// Serve your dashboard folder
 app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
-app.use(express.static(path.join(__dirname, "dashboard")));
-app.use(express.static(path.join(__dirname, "public")));
 
-const PORT = process.env.PORT || 10000;
+// Serve a public folder for chat tester
+app.use("/", express.static(path.join(__dirname, "public")));
+
+const PORT = process.env.PORT || 10000; // Render/hosting port fallback
 
 /* =========================
    IN-MEMORY SESSIONS
+   - Key: callSid for Twilio
+   - Key: chatSessionId for Web chat
 ========================= */
 
-const sessions = new Map();
+const sessions = new Map(); // Stores state for each live conversation
 
-/* =========================
-   ENV FALLBACKS (IMPORTANT)
-========================= */
+/* ===================================================================
+   SCRIPT HELPERS (DETERMINISTIC FLOW)
+=================================================================== */
 
-// Example env you can set on Render:
-// DEFAULT_MENU="Cheese Lovers,Pepperoni,Veggie Supreme,Butter Chicken,Shahi Paneer,Tandoori Chicken"
-// DEFAULT_SIDES="Garlic Bread,Chicken Wings,Fries,Coke,Sprite"
+/* ---------- text utilities ---------- */
 
-function parseCsvEnv(name) {
-  const raw = process.env[name];
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-const FALLBACK_MENU = parseCsvEnv("DEFAULT_MENU");
-const FALLBACK_SIDES = parseCsvEnv("DEFAULT_SIDES");
-
-/* =========================
-   STORE RESOLVER
-========================= */
-
-function resolveStore({ toPhone } = {}) {
-  const phone = toPhone || process.env.DEFAULT_STORE_PHONE;
-  if (!phone) return null;
-  return getStoreByPhone(phone);
-}
-
-/* =========================
-   TEXT HELPERS
-========================= */
-
+// Normalize any input to a clean string
 function norm(text) {
   return String(text || "").trim();
 }
 
+// Detect "done / nothing else" phrases
 function isDone(text) {
-  return /(no$|no more|that's all|that’s all|thats all|done|finish|nothing else|nope|all good)/i.test(
-    norm(text).toLowerCase()
-  );
+  const t = norm(text).toLowerCase();
+  return /(no$|no more|that's all|that’s all|thats all|done|finish|nothing else|nope|all good)/i.test(t);
 }
 
+// Detect "no sides"
 function isNoSides(text) {
-  return /(no sides|no side|without sides|none|nothing|no thanks|no thank you|dont want sides|don't want sides)/i.test(
-    norm(text).toLowerCase()
-  );
+  const t = norm(text).toLowerCase();
+  return /(no sides|no side|without sides|none|nothing|no thanks|no thank you|dont want sides|don't want sides)/i.test(t);
 }
 
+// Confirmation yes
 function isConfirmYes(text) {
   return /^(yes|yeah|yep|correct|right|that's right|that is right|confirm)$/i.test(norm(text));
 }
+
+// Confirmation no
 function isConfirmNo(text) {
   return /^(no|nope|wrong|incorrect|change|not correct)$/i.test(norm(text));
 }
 
+// Detect pickup/delivery in user message
 function detectOrderType(text) {
   const t = norm(text).toLowerCase();
   if (/(pickup|pick up|picup|carryout|carry out|takeaway|take away)/i.test(t)) return "Pickup";
@@ -110,14 +86,7 @@ function detectOrderType(text) {
   return null;
 }
 
-function detectSpice(text) {
-  const t = norm(text).toLowerCase();
-  if (/^(mild|not spicy|low spicy)$/i.test(t)) return "Mild";
-  if (/^(medium|mid|medium spicy)$/i.test(t)) return "Medium";
-  if (/^(hot|spicy|extra spicy|very spicy)$/i.test(t)) return "Hot";
-  return null;
-}
-
+// Detect size
 function detectSize(text) {
   const t = norm(text).toLowerCase();
   if (/^(small|s)$/i.test(t)) return "Small";
@@ -126,382 +95,393 @@ function detectSize(text) {
   return null;
 }
 
+// Detect spice level
+function detectSpice(text) {
+  const t = norm(text).toLowerCase();
+  if (/^(mild|not spicy|low spicy)$/i.test(t)) return "Mild";
+  if (/^(medium|mid|medium spicy)$/i.test(t)) return "Medium";
+  if (/^(hot|spicy|extra spicy|very spicy)$/i.test(t)) return "Hot";
+  return null;
+}
+
+// Detect if user is asking menu
 function isAskingMenu(text) {
   const t = norm(text).toLowerCase();
   return /(menu|what pizzas|which pizzas|pizza options|pizza do you have|available pizzas)/i.test(t);
 }
 
+// Detect if user is asking sides
 function isAskingSides(text) {
   const t = norm(text).toLowerCase();
-  return /(sides|side options|what sides|which sides|sided available|addons|add ons|drinks)/i.test(t);
+  return /(sides|side options|what sides|which sides|sides available|addons|add ons|drinks)/i.test(t);
+}
+
+/* ---------- store config getters (ROBUST) ---------- */
+/**
+ * Your store object can be structured differently depending on your JSON loader.
+ * This function tries multiple common paths so "sides not listed" doesn't happen.
+ */
+function getSidesList(store) {
+  // Try common keys where sides might live
+  const candidates = [
+    store?.sides,
+    store?.menu?.sides,
+    store?.conversation?.sides,
+    store?.config?.sides,
+    store?.pizza?.sides,
+    store?.data?.sides
+  ];
+
+  // Return the first array-like candidate
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length) return c;
+  }
+
+  // If nothing found, return empty
+  return [];
 }
 
 /**
- * Detect sides from user message, even if store sides list is empty.
- * - If sides list exists: match by inclusion.
- * - If sides list missing: still detect common drinks (coke/sprite/etc).
+ * Menu list getter (same idea).
+ */
+function getMenuList(store) {
+  const candidates = [
+    store?.menu,
+    store?.menu?.pizzas,
+    store?.pizzas,
+    store?.conversation?.menu,
+    store?.config?.menu,
+    store?.data?.menu
+  ];
+
+  // If store.menu is an object, it might contain pizzas array inside
+  if (Array.isArray(store?.menu) && store.menu.length) return store.menu;
+
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length) return c;
+  }
+
+  return [];
+}
+
+/**
+ * Some pizzas require spice. You can drive this from JSON if you want.
+ * If not available, we default to: Shahi Paneer + Butter Chicken + Tandoori Chicken require spice.
+ */
+function pizzaRequiresSpice(store, pizzaName) {
+  const name = norm(pizzaName).toLowerCase();
+
+  // If your JSON provides rules like: store.rules.spiceRequired = ["Shahi Paneer", ...]
+  const configured = store?.rules?.spiceRequired;
+  if (Array.isArray(configured)) {
+    return configured.map(s => s.toLowerCase()).includes(name);
+  }
+
+  // Fallback rules
+  return /(shahi paneer|butter chicken|tandoori chicken)/i.test(name);
+}
+
+/* ---------- sides extraction ---------- */
+/**
+ * Detect sides from user message.
+ * - If sides list exists: match inclusion.
+ * - Also detect common drinks/words.
  */
 function extractSidesFromText(text, knownSides = []) {
-  const t = norm(text).toLowerCase();
-  const found = new Set();
+  const t = norm(text).toLowerCase(); // Normalize
+  const found = new Set(); // Collect unique sides
 
   // Match from known sides list
   for (const s of knownSides) {
-    const sLow = s.toLowerCase();
+    const sLow = String(s).toLowerCase();
     if (sLow && t.includes(sLow)) found.add(s);
   }
-/* =========================
-   STORE MENU & SIDES HELPERS
-========================= */
-
-function getMenuList(store) {
-  if (Array.isArray(store?.menu)) return store.menu;
-  if (store?.menu && typeof store.menu === "object") return Object.keys(store.menu);
-  if (Array.isArray(store?.data?.menu)) return store.data.menu;
-  if (store?.conversation?.menu) return Object.keys(store.conversation.menu);
-  return [];
-}
-
-function getSidesList(store) {
-  // ✅ Reads sides from pizza64.json even if stored as an object
-  if (Array.isArray(store?.sides)) return store.sides;
-  if (store?.sides && typeof store.sides === "object") return Object.keys(store.sides);
-  if (Array.isArray(store?.data?.sides)) return store.data.sides;
-  if (store?.conversation?.sides) return Object.keys(store.conversation.sides);
-  return [];
-}
 
   // Fallback detection for common items
-  const common = [
-    "Coke",
-    "Sprite",
-    "Pepsi",
-    "Water",
-    "Fries",
-    "Garlic Bread",
-    "Wings",
-    "Ranch"
-  ];
+  const common = ["Coke", "Sprite", "Pepsi", "Water", "Fries", "Garlic Bread", "Wings", "Ranch"];
   for (const c of common) {
     if (t.includes(c.toLowerCase())) found.add(c);
   }
 
-  return Array.from(found);
+  return Array.from(found); // Return array
 }
 
-/* =========================
-   SESSION
-========================= */
+/* ===================================================================
+   SESSION SHAPE + DEFAULTS
+=================================================================== */
 
-function makeSession({ id, store, from, to }) {
+function makeNewSession(store, caller) {
   return {
-    id: id || crypto.randomUUID(),
-    store_id: store?.id || null,
-    caller: from || null,
-    to: to || null,
-
-    orderType: null,
-    address: null,
-    items: [],
-    sides: [],
-    notes: null,
-
-    confirming: false,
-    sidesAsked: false,
-
-    awaiting: null, // "size" | "spice" | "address"
-    awaitingItemIndex: null
+    store_id: store.id, // Store id
+    caller: caller || null, // Caller phone (Twilio From)
+    orderType: null, // "Pickup" or "Delivery"
+    address: null, // Needed for delivery
+    items: [], // [{ name, size, qty, spice }]
+    sides: [], // ["Coke", ...]
+    confirming: false // When true, we expect yes/no OR modifications
   };
 }
 
-/* =========================
-   STORE CONFIG READERS
-========================= */
+/* ===================================================================
+   CORE SCRIPT BRAIN: handleUserTurn()
+   - Deterministic: always asks for missing required fields
+   - Handles menu/sides questions anytime
+   - Allows changes during confirmation
+=================================================================== */
 
-function getMenuList(store) {
-  const menu =
-    store?.menu ||
-    store?.conversation?.menu ||
-    store?.data?.menu ||
-    store?.config?.menu ||
-    [];
-  const arr = Array.isArray(menu) ? menu : [];
-  return arr.length ? arr : FALLBACK_MENU;
-}
+async function handleUserTurn({ store, session, text }) {
+  const userText = norm(text); // Normalize input
+  const menu = getMenuList(store); // Store menu list
+  const sidesList = getSidesList(store); // Store sides list
 
-function getSidesList(store) {
-  const sides =
-    store?.sides ||
-    store?.conversation?.sides ||
-    store?.data?.sides ||
-    store?.config?.sides ||
-    [];
-  const arr = Array.isArray(sides) ? sides : [];
-  return arr.length ? arr : FALLBACK_SIDES;
-}
+  /* ---------- 1) Handle FAQ-style questions anytime ---------- */
 
-function getGreeting(store) {
-  return store?.conversation?.greeting || "Hi! Welcome 🙂 Pickup or delivery?";
-}
-
-function getSpiceLevels(store) {
-  const levels = store?.conversation?.spiceLevels || store?.spiceLevels || ["Mild", "Medium", "Hot"];
-  return Array.isArray(levels) ? levels : ["Mild", "Medium", "Hot"];
-}
-
-/* =========================
-   CONFIRMATION TEXT
-========================= */
-
-function formatItem(i) {
-  const qty = i?.qty ? `${i.qty}` : "1";
-  const size = i?.size ? ` ${i.size}` : "";
-  const name = i?.name ? ` ${i.name}` : "";
-  const spice = i?.spice ? ` (${i.spice})` : "";
-  return `${qty}${size}${name}${spice}`.trim();
-}
-
-function buildConfirmation(store, session) {
-  const itemsText = session.items.length
-    ? session.items.map((i, idx) => `${idx + 1}. ${formatItem(i)}`).join(". ")
-    : "No items";
-
-  const sidesText = session.sides.length
-    ? ` Sides: ${session.sides.join(", ")}.`
-    : " No sides.";
-
-  const typeText = session.orderType ? ` Order type: ${session.orderType}.` : "";
-  const addrText =
-    session.orderType === "Delivery" && session.address
-      ? ` Delivery address: ${session.address}.`
-      : "";
-
-  return `Please confirm your order.${typeText} ${itemsText}.${sidesText}${addrText} Is that correct?`;
-}
-
-/* =========================
-   CORE FLOW
-========================= */
-
-async function handleUserTurn(store, session, rawText) {
-  const text = norm(rawText);
-  const knownSides = getSidesList(store);
-  const menu = getMenuList(store);
-
-  // 1) Menu / sides questions
-  if (isAskingMenu(text)) {
-    if (!menu.length) return "I don’t have the menu loaded yet. Please tell me what pizza you want.";
-    return `Here are our pizzas: ${menu.join(", ")}. What would you like to order?`;
-  }
-
-  if (isAskingSides(text)) {
-    if (!knownSides.length) {
-      return "Sides aren’t configured yet in the store settings. You can still say: add coke / add fries, or say: no sides.";
+  if (isAskingMenu(userText)) {
+    if (!menu.length) {
+      return { reply: "Menu is not set yet. Please tell me what pizza you’d like." };
     }
-    return `Our sides are: ${knownSides.join(", ")}. Would you like any sides? (Or say: no sides)`;
+    return { reply: `We have: ${menu.join(", ")}. What would you like to order?` };
   }
 
-  // 2) If user says "no sides" at ANY time: lock it in and move on
-  if (isNoSides(text)) {
-    session.sides = [];
-    session.sidesAsked = true;
-
-    // If we were confirming, re-confirm immediately
-    if (session.items.length && session.orderType) {
-      session.confirming = true;
-      return buildConfirmation(store, session);
+  if (isAskingSides(userText)) {
+    if (!sidesList.length) {
+      return { reply: "Sides are not set yet. You can say: no sides, or tell me what side you want." };
     }
-
-    return "Got it — no sides. What would you like next?";
+    return { reply: `Available sides are: ${sidesList.join(", ")}. Would you like any sides?` };
   }
 
-  // 3) If user is at confirmation and says "add coke", treat as edit + re-confirm
-  // Also works outside confirmation.
-  const mentionedSides = extractSidesFromText(text, knownSides);
-
-  // Detect "add" intent OR user simply typed a side name
-  const looksLikeSideAdd = /(add|also|include|with|and)\b/i.test(text) || mentionedSides.length > 0;
-
-  if (looksLikeSideAdd && mentionedSides.length > 0) {
-    const merged = new Set([...(session.sides || []), ...mentionedSides]);
-    session.sides = Array.from(merged);
-    session.sidesAsked = true;
-
-    // If user was confirming or is done, go straight to confirmation
-    if (session.items.length && session.orderType && (session.confirming || isDone(text))) {
-      session.confirming = true;
-      return `Got it — added ${mentionedSides.join(", ")}. ` + buildConfirmation(store, session);
-    }
-
-    return `Got it — added ${mentionedSides.join(", ")}. Anything else?`;
-  }
-
-  // 4) Confirm logic
+  /* ---------- 2) If we are in confirmation mode, allow edits ---------- */
   if (session.confirming) {
-    if (isConfirmYes(text)) {
-      await Promise.resolve(
-        createTicket({
-          store_id: store.id,
-          caller: session.caller,
-          items: session.items,
-          sides: session.sides,
-          orderType: session.orderType || "Pickup",
-          address: session.orderType === "Delivery" ? session.address : null
-        })
-      );
+    // If user confirms, create ticket and end
+    if (isConfirmYes(userText)) {
+      createTicket({
+        store_id: store.id,
+        caller: session.caller,
+        items: session.items,
+        sides: session.sides,
+        orderType: session.orderType || "Pickup",
+        address: session.address || null
+      });
 
-      sessions.delete(session.id);
-      return "Your order is confirmed. Thank you!";
+      return { reply: "Your order is confirmed. Thank you!", done: true };
     }
 
-    if (isConfirmNo(text)) {
+    // If user says it's wrong, exit confirmation and ask for correction
+    if (isConfirmNo(userText)) {
       session.confirming = false;
-      session.awaiting = null;
-      session.awaitingItemIndex = null;
-      return "No problem. Tell me what you want to change (pizza, size, spice, sides, pickup/delivery).";
+      return { reply: "No problem. Tell me what you want to change (pizza, size, spice, sides, or pickup/delivery)." };
     }
 
-    // Anything else while confirming = treat as correction
+    // If user tries to add/modify during confirmation (like "add coke")
+    const addedSides = extractSidesFromText(userText, sidesList);
+    if (addedSides.length) {
+      // Merge new sides
+      const merged = new Set([...(session.sides || []), ...addedSides]);
+      session.sides = Array.from(merged);
+      // Re-confirm with updated summary
+      return { reply: buildConfirmation(store, session) };
+    }
+
+    // If user says "no sides" during confirmation, clear sides and re-confirm
+    if (isNoSides(userText) || isDone(userText)) {
+      session.sides = [];
+      return { reply: buildConfirmation(store, session) };
+    }
+
+    // If user said something else while confirming, we treat it as a change request
+    // Exit confirmation and continue slot-filling
     session.confirming = false;
   }
 
-  // 5) Pickup/delivery anywhere
-  const type = detectOrderType(text);
-  if (type) session.orderType = type;
+  /* ---------- 3) Merge easy detections from raw text (script) ---------- */
 
-  // 6) Slot filling
-  if (session.awaiting === "address") {
-    session.address = text;
-    session.awaiting = null;
-    session.awaitingItemIndex = null;
+  // Order type if said inline
+  const detectedType = detectOrderType(userText);
+  if (detectedType) session.orderType = detectedType;
+
+  // Extract sides even before we explicitly ask (people do “add coke” early)
+  const sideHits = extractSidesFromText(userText, sidesList);
+  if (sideHits.length) {
+    const merged = new Set([...(session.sides || []), ...sideHits]);
+    session.sides = Array.from(merged);
   }
 
-  if (session.awaiting === "size") {
-    const size = detectSize(text);
-    if (size && session.awaitingItemIndex != null) {
-      session.items[session.awaitingItemIndex].size = size;
-      session.awaiting = null;
-      session.awaitingItemIndex = null;
-    } else {
-      return "Please say a size: Small, Medium, or Large.";
-    }
-  }
-
-  if (session.awaiting === "spice") {
-    const spice = detectSpice(text);
-    if (spice && session.awaitingItemIndex != null) {
-      session.items[session.awaitingItemIndex].spice = spice;
-      session.awaiting = null;
-      session.awaitingItemIndex = null;
-    } else {
-      return `Please say a spice level: ${getSpiceLevels(store).join(", ")}.`;
-    }
-  }
-
-  // 7) AI extraction (best effort)
-  let ai = null;
+  /* ---------- 4) Optional: Use AI to parse items if available ---------- */
+  // This helps with phrases like “2 large shahi paneer and 1 medium pepperoni”
+  // But the script still controls what to ask next.
   try {
-    ai = await extractMeaning(store, text);
+    const ai = await extractMeaning(store, userText);
+
+    if (ai && typeof ai === "object") {
+      // Merge order type (AI)
+      if (ai.orderType) session.orderType = ai.orderType;
+
+      // Merge sides (AI)
+      if (Array.isArray(ai.sides) && ai.sides.length) {
+        const merged = new Set([...(session.sides || []), ...ai.sides]);
+        session.sides = Array.from(merged);
+      }
+
+      // Merge items (AI)
+      if (Array.isArray(ai.items) && ai.items.length) {
+        // Normalize item fields so script can validate them
+        session.items = ai.items.map((it) => ({
+          name: it.name || it.pizza || it.item || null,
+          size: it.size || null,
+          qty: Number(it.qty || 1),
+          spice: it.spice || null
+        }));
+      }
+    }
   } catch (e) {
-    console.error("AI extractMeaning error:", e);
+    // If AI fails, ignore and keep script-only behavior
+    // (No crash. No stuck.)
   }
 
-  if (ai && typeof ai === "object") {
-    if (ai.orderType) session.orderType = ai.orderType;
-    if (ai.address) session.address = ai.address;
-
-    if (Array.isArray(ai.sides)) {
-      session.sides = ai.sides;
-      session.sidesAsked = true;
-    }
-
-    if (Array.isArray(ai.items) && ai.items.length) {
-      session.items = ai.items.map((it) => ({
-        name: it.name || it.pizza || it.item || "",
-        qty: Number(it.qty || it.quantity || 1) || 1,
-        size: it.size || null,
-        spice: it.spice || null
-      }));
-    }
-  }
-
-  // 8) Decision / Next Question
-  if (!session.orderType) return "Pickup or delivery?";
-
-  if (session.orderType === "Delivery" && !session.address) {
-    session.awaiting = "address";
-    return "What’s the delivery address?";
-  }
-
+  /* ---------- 5) If no items yet, ask for pizza ---------- */
   if (!session.items.length) {
-    const hint = menu.length ? ` You can say: 1 large ${menu[0]}.` : "";
-    return `What would you like to order?${hint}`;
+    return { reply: "What would you like to order? (You can say: 1 large pepperoni)" };
   }
 
-  // Ensure each item has qty+size+spice
-  for (let idx = 0; idx < session.items.length; idx++) {
-    const it = session.items[idx];
-    if (!it.qty) it.qty = 1;
+  /* ---------- 6) Slot filling for each item: qty, size, spice (if required) ---------- */
 
-    if (!it.size) {
-      session.awaiting = "size";
-      session.awaitingItemIndex = idx;
-      return `What size for ${it.name || "that pizza"}? Small, Medium, or Large?`;
+  // Fill missing fields from this message if user answered with just "large" or "2" or "hot"
+  // If user said only “large”, we apply it to the first item missing size.
+  const msgSize = detectSize(userText);
+  const msgSpice = detectSpice(userText);
+
+  if (msgSize) {
+    const target = session.items.find((i) => !i.size);
+    if (target) target.size = msgSize;
+  }
+
+  if (msgSpice) {
+    const target = session.items.find((i) => {
+      const needs = pizzaRequiresSpice(store, i.name);
+      return needs && !i.spice;
+    });
+    if (target) target.spice = msgSpice;
+  }
+
+  // Qty parsing: if user replies "2" to qty question
+  const qtyNum = Number.parseInt(userText, 10);
+  if (!Number.isNaN(qtyNum) && qtyNum > 0 && qtyNum < 50) {
+    const target = session.items.find((i) => !i.qty || i.qty === 1);
+    if (target) target.qty = qtyNum;
+  }
+
+  // Now compute what’s missing (priority order)
+  const missing = getMissing(store, session);
+
+  /* ---------- 7) Ask next missing thing deterministically ---------- */
+  if (missing.length) {
+    return { reply: missing[0] };
+  }
+
+  /* ---------- 8) If all required fields are filled, ask sides (optional) ---------- */
+  // If user already gave sides earlier, we can skip asking and go confirm.
+  if (!session.sides || session.sides.length === 0) {
+    // If store has sides list, ask properly
+    if (sidesList.length) {
+      return { reply: `Would you like any sides? Available: ${sidesList.join(", ")}. (Or say: no sides)` };
     }
-
-    if (!it.spice) {
-      session.awaiting = "spice";
-      session.awaitingItemIndex = idx;
-      return `What spice level for ${it.name || "that pizza"}? ${getSpiceLevels(store).join(", ")}?`;
-    }
+    // If no sides configured, allow "no sides"
+    return { reply: "Would you like any sides? (Or say: no sides)" };
   }
 
-  // Ask sides once (but if user says "that's all" we confirm immediately)
-  if (!session.sidesAsked) {
-    session.sidesAsked = true;
-
-    if (isDone(text)) {
-      session.confirming = true;
-      return buildConfirmation(store, session);
-    }
-
-    if (!knownSides.length) {
-      return "Would you like any sides? (You can say: add coke / add fries, or say: no sides)";
-    }
-
-    return `Would you like any sides? Available: ${knownSides.join(", ")}. (Or say: no sides)`;
-  }
-
-  // If user says done, confirm
-  if (isDone(text)) {
-    session.confirming = true;
-    return buildConfirmation(store, session);
-  }
-
-  // Optional engine hook
-  const maybeNext =
-    typeof conversationEngine?.nextQuestion === "function"
-      ? conversationEngine.nextQuestion(store, session)
-      : (typeof conversationEngine?.default === "function" ? conversationEngine.default(store, session) : null);
-
-  if (typeof maybeNext === "string" && maybeNext && maybeNext !== "confirm") {
-    return maybeNext;
-  }
-
+  /* ---------- 9) Confirmation ---------- */
   session.confirming = true;
-  return buildConfirmation(store, session);
+  return { reply: buildConfirmation(store, session) };
 }
 
-/* =========================
-   TWILIO VOICE
-========================= */
+/* ===================================================================
+   Determine what is missing (CHECKLIST QUESTIONS)
+=================================================================== */
+
+function getMissing(store, session) {
+  const missingQuestions = []; // List of next prompts
+
+  // 1) Order type
+  if (!session.orderType) {
+    missingQuestions.push("Pickup or delivery?");
+    return missingQuestions; // Stop early: always ask orderType first
+  }
+
+  // 2) If delivery, need address
+  if (session.orderType === "Delivery" && !session.address) {
+    missingQuestions.push("What is the delivery address?");
+    return missingQuestions;
+  }
+
+  // 3) For each item, require name, size, qty, spice(if required)
+  for (const item of session.items) {
+    // Ensure name exists
+    if (!item.name) {
+      missingQuestions.push("Which pizza would you like? (Example: Shahi Paneer)");
+      return missingQuestions;
+    }
+
+    // Require size
+    if (!item.size) {
+      missingQuestions.push(`What size for ${item.name}? Small, Medium, or Large?`);
+      return missingQuestions;
+    }
+
+    // Require qty (default to 1, but if you want to always ask, remove defaulting)
+    if (!item.qty || item.qty < 1) {
+      missingQuestions.push(`How many ${item.size} ${item.name} pizzas would you like?`);
+      return missingQuestions;
+    }
+
+    // Require spice only if pizza requires it
+    if (pizzaRequiresSpice(store, item.name) && !item.spice) {
+      missingQuestions.push(`What spice level for ${item.name}? Mild, Medium, Hot?`);
+      return missingQuestions;
+    }
+  }
+
+  return missingQuestions; // Empty means nothing missing
+}
+
+/* ===================================================================
+   CONFIRMATION MESSAGE
+=================================================================== */
+
+function buildConfirmation(store, session) {
+  // Make a clean item summary
+  const items = session.items
+    .map((i, idx) => {
+      const qty = i.qty || 1; // qty fallback
+      const size = i.size ? `${i.size} ` : ""; // size fallback
+      const spice = i.spice ? ` (${i.spice})` : ""; // spice fallback
+      return `${idx + 1}. ${qty} ${size}${i.name}${spice}`;
+    })
+    .join(". ");
+
+  // Sides summary
+  const sidesText = session.sides && session.sides.length ? session.sides.join(", ") : "No sides";
+
+  // Address only if delivery
+  const addrText = session.orderType === "Delivery" ? ` Address: ${session.address || "(missing)"}.` : "";
+
+  return `Please confirm your order. Order type: ${session.orderType}. ${items}. Sides: ${sidesText}.${addrText} Is that correct?`;
+}
+
+/* ===================================================================
+   TWILIO ROUTES
+=================================================================== */
 
 app.post("/twilio/voice", (req, res) => {
-  const store = resolveStore({ toPhone: req.body.To });
-  if (!store) return res.sendStatus(404);
+  const store = getStoreByPhone(req.body.To); // Store by called number
+  const twiml = new twilio.twiml.VoiceResponse(); // TwiML builder
 
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say({ voice: "alice", language: "en-CA" }, getGreeting(store));
+  // Greeting message
+  twiml.say(
+    { voice: "alice", language: "en-CA" },
+    store?.conversation?.greeting || "Hi! What would you like to order?"
+  );
+
+  // Gather speech
   twiml.gather({
     input: "speech",
     language: "en-CA",
@@ -510,28 +490,46 @@ app.post("/twilio/voice", (req, res) => {
     method: "POST"
   });
 
+  // Return XML
   res.type("text/xml").send(twiml.toString());
 });
 
 app.post("/twilio/step", async (req, res) => {
   try {
-    const store = resolveStore({ toPhone: req.body.To });
-    if (!store) return res.sendStatus(404);
+    const store = getStoreByPhone(req.body.To); // Store lookup
+    if (!store) return res.sendStatus(404); // No store config
 
-    const sessionId = req.body.CallSid;
-    const speech = norm(req.body.SpeechResult);
+    const callSid = req.body.CallSid; // Session key
+    const speech = norm(req.body.SpeechResult); // User speech text
 
-    if (!sessions.has(sessionId)) {
-      const s = makeSession({ id: sessionId, store, from: req.body.From, to: req.body.To });
-      sessions.set(sessionId, s);
+    // Create session if missing
+    if (!sessions.has(callSid)) {
+      sessions.set(callSid, makeNewSession(store, req.body.From));
     }
 
-    const session = sessions.get(sessionId);
+    const session = sessions.get(callSid); // Get session state
 
-    if (!speech) return respondTwilio(res, "Sorry, I didn’t catch that. Please say it again.");
+    // Silence protection
+    if (!speech) {
+      return respondTwilio(res, "Sorry, I didn’t catch that. Please say it again.");
+    }
 
-    const reply = await handleUserTurn(store, session, speech);
-    return respondTwilio(res, reply);
+    // If delivery address question, store address directly when asked
+    if (session.orderType === "Delivery" && !session.address) {
+      // If they reply with something that looks like an address, store it
+      // (Basic: just store whatever they said)
+      session.address = speech;
+      // Continue with script flow
+    }
+
+    // Run deterministic turn handler
+    const out = await handleUserTurn({ store, session, text: speech });
+
+    // If done, clear session
+    if (out?.done) sessions.delete(callSid);
+
+    // Respond back to Twilio
+    return respondTwilio(res, out?.reply || "Sorry, could you repeat that?");
   } catch (err) {
     console.error("❌ Twilio step error:", err);
     const twiml = new twilio.twiml.VoiceResponse();
@@ -540,65 +538,10 @@ app.post("/twilio/step", async (req, res) => {
   }
 });
 
-/* =========================
-   WEB CHAT TEST API
-========================= */
-
-app.post("/api/chat/start", (req, res) => {
-  const storePhone = req.body?.storePhone || process.env.DEFAULT_STORE_PHONE;
-  const store = resolveStore({ toPhone: storePhone });
-  if (!store) {
-    return res.status(400).json({ error: "Store not found. Set DEFAULT_STORE_PHONE or send storePhone." });
-  }
-
-  const session = makeSession({ store, from: req.body?.from || "web-user", to: storePhone });
-  sessions.set(session.id, session);
-
-  res.json({
-    sessionId: session.id,
-    message: "New session started. What would you like to order?"
-  });
-});
-
-app.post("/api/chat/message", async (req, res) => {
-  const sessionId = req.body?.sessionId;
-  const text = norm(req.body?.text);
-
-  if (!sessionId || !sessions.has(sessionId)) {
-    return res.status(400).json({ error: "Invalid sessionId. Start with /api/chat/start" });
-  }
-
-  const session = sessions.get(sessionId);
-  const store = resolveStore({ toPhone: session.to }) || resolveStore({});
-  if (!store) return res.status(400).json({ error: "Store not found." });
-
-  if (!text) return res.json({ message: "Please type something." });
-
-  const reply = await handleUserTurn(store, session, text);
-
-  // If confirmed, session may be deleted
-  if (!sessions.has(sessionId)) {
-    return res.json({ message: reply });
-  }
-
-  res.json({ message: reply });
-});
-
-/* =========================
-   DASHBOARD API
-========================= */
-
-app.get("/api/stores/:id/tickets", (req, res) => {
-  res.json(getTicketsByStore(req.params.id));
-});
-
-/* =========================
-   TWILIO HELPER
-========================= */
-
+// Helper to respond in Twilio format
 function respondTwilio(res, text) {
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say({ voice: "alice", language: "en-CA" }, text);
+  const twiml = new twilio.twiml.VoiceResponse(); // Create TwiML
+  twiml.say({ voice: "alice", language: "en-CA" }, text); // Speak response
   twiml.gather({
     input: "speech",
     language: "en-CA",
@@ -606,8 +549,68 @@ function respondTwilio(res, text) {
     action: "/twilio/step",
     method: "POST"
   });
-  res.type("text/xml").send(twiml.toString());
+  res.type("text/xml").send(twiml.toString()); // Return XML
 }
+
+/* ===================================================================
+   WEB CHAT TESTER API
+   - Start: POST /api/chat/start
+   - Message: POST /api/chat/message  { sessionId, to, text }
+=================================================================== */
+
+app.post("/api/chat/start", (req, res) => {
+  const to = req.body?.to || process.env.DEFAULT_STORE_TO; // store phone (same as Twilio To)
+  const store = getStoreByPhone(to); // lookup store
+
+  if (!store) return res.status(404).json({ error: "Store not found for this 'to' value." });
+
+  // Make a simple session id
+  const sessionId = `chat_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+  // Create session
+  sessions.set(sessionId, makeNewSession(store, "web"));
+
+  // Reply greeting
+  res.json({
+    sessionId,
+    message: store?.conversation?.greeting || "New session started. What would you like to order?"
+  });
+});
+
+app.post("/api/chat/message", async (req, res) => {
+  const sessionId = req.body?.sessionId; // chat session id
+  const to = req.body?.to || process.env.DEFAULT_STORE_TO; // store phone
+  const text = norm(req.body?.text); // user text
+
+  const store = getStoreByPhone(to); // store lookup
+  if (!store) return res.status(404).json({ error: "Store not found." });
+
+  if (!sessions.has(sessionId)) {
+    // If session missing, force user to /start
+    return res.status(400).json({ error: "Session not found. Call /api/chat/start first." });
+  }
+
+  const session = sessions.get(sessionId); // get session
+
+  // If the next missing is address, store it directly
+  if (session.orderType === "Delivery" && !session.address) {
+    session.address = text;
+  }
+
+  const out = await handleUserTurn({ store, session, text });
+
+  if (out?.done) sessions.delete(sessionId);
+
+  res.json({ message: out?.reply || "Sorry, say that again.", done: !!out?.done });
+});
+
+/* ===================================================================
+   DASHBOARD API
+=================================================================== */
+
+app.get("/api/stores/:id/tickets", (req, res) => {
+  res.json(getTicketsByStore(req.params.id));
+});
 
 /* =========================
    SERVER
@@ -615,7 +618,6 @@ function respondTwilio(res, text) {
 
 app.listen(PORT, () => {
   console.log("🚀 Store AI running on port", PORT);
-  console.log("🧪 Web chat test: /chat.html (or /dashboard/chat.html)");
 });
 
 //version 1 
