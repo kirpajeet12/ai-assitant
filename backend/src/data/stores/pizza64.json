@@ -3,7 +3,7 @@
   "name": "Pizza 64 (Surrey 132nd)",
   "phone": "+12183963550",
   "conversation": {
-    "greeting": "New session started. What would you like to order? You can ask: menu, veg options, or sides."
+    "greeting": "welcome. What would you like to order?."
   },
   "settings": {
     "supportedSizes": ["Small", "Medium", "Large"],
