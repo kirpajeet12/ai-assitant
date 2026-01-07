@@ -17,6 +17,19 @@
     "supportedSizes": ["Small", "Medium", "Large"],
     "orderTypes": ["Pickup", "Delivery"]
   },
+  "itemTypes": {
+    "pizza": {
+      "allowsNotes": true,
+      "allowsHalfAndHalf": true,
+      "allowedNotes": [
+        "extra cheese",
+        "no onion",
+        "no capsicum",
+        "well done",
+        "less spicy"
+      ]
+    }
+  },
   "menu": {
     "pizzas": {
       "specialty": [
