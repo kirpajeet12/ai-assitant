@@ -283,28 +283,7 @@ app.post("/twilio/step", (req, res) => {
   }
 });
 
-      // Cleanup memory
-      voiceSessions.delete(callSid);
-
-      // Say final message and hang up
-      const twiml = new twilio.twiml.VoiceResponse();
-      twiml.say({ voice: "alice", language: "en-CA" }, result.reply || "Perfect — your order is confirmed. Thank you!");
-      twiml.hangup();
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    // Continue the call
-    return twilioRespond(res, result.reply);
-
-  } catch (err) {
-    console.error("❌ Twilio step error:", err);
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.say({ voice: "alice", language: "en-CA" }, "Sorry, something went wrong. Please try again.");
-    twiml.hangup();
-    return res.type("text/xml").send(twiml.toString());
-  }
-});
-
+  
 /* =========================
    WEB CHAT: START
 ========================= */
