@@ -1,193 +1,340 @@
+import { getOrCreateTicket, saveTicket } from "./services/ticketService.js";
 
 /**
- * conversationEngine.js
- * JSON-driven, multi-store, no hardcoding
+ * MAIN CONVERSATION ENGINE
+ * This is the ONLY file controlling order flow
  */
+export function conversationEngine(phone, userText) {
+  const ticket = getOrCreateTicket(phone);
+  const msg = userText.toLowerCase().trim();
 
-function norm(t) {
-  return String(t || "").trim();
-}
-function lower(t) {
-  return norm(t).toLowerCase();
-}
-function hasAny(t, arr) {
-  return arr.some(x => t.includes(x));
+  /* =========================
+     SAFETY: CONFIRMED ORDER
+  ========================= */
+  if (ticket.confirmed) {
+    return `Your order is already confirmed 👍  
+Order number: ${ticket.id}`;
+  }
+
+  /* =========================
+     START
+  ========================= */
+  if (!ticket.step || ticket.step === "START") {
+    ticket.step = "MAIN_ITEM";
+    saveTicket(ticket);
+    return "Welcome to Pizza 64! What would you like to order today?";
+  }
+
+  /* =========================
+     MAIN ITEM (PIZZA / WINGS)
+  ========================= */
+  if (ticket.step === "MAIN_ITEM") {
+    ticket.items.push(userText);
+    ticket.step = "ORDER_TYPE";
+    saveTicket(ticket);
+
+    return `Got it 👍  
+Would you like **pickup or delivery**?`;
+  }
+
+  /* =========================
+     PICKUP / DELIVERY
+  ========================= */
+  if (ticket.step === "ORDER_TYPE") {
+    if (!msg.includes("pickup") && !msg.includes("delivery")) {
+      return "Please tell me if this is **pickup or delivery**.";
+    }
+
+    ticket.orderType = msg.includes("delivery") ? "Delivery" : "Pickup";
+    ticket.step = "SIDES";
+    saveTicket(ticket);
+
+    return `Perfect 👍  
+Your ${ticket.orderType.toLowerCase()} order will be ready in about **20 minutes**.
+
+Would you like to add **sides or drinks**?
+We have **wings, garlic bread, fries, and cold drinks**.`;
+  }
+
+  /* =========================
+     SIDES
+  ========================= */
+  if (ticket.step === "SIDES") {
+    if (msg.includes("wing")) {
+      ticket.pendingSide = "wings";
+      ticket.step = "WINGS_QTY";
+      saveTicket(ticket);
+
+      return `Nice choice 😄  
+How many wings would you like?
+• 6 pcs  
+• 10 pcs  
+• 20 pcs`;
+    }
+
+    if (!msg.includes("no")) {
+      ticket.items.push(userText);
+    }
+
+    ticket.step = "SUMMARY";
+    saveTicket(ticket);
+    return buildSummary(ticket);
+  }
+
+  /* =========================
+     WINGS QUANTITY
+  ========================= */
+  if (ticket.step === "WINGS_QTY") {
+    const qtyMatch = msg.match(/\d+/);
+    if (!qtyMatch) {
+      return "Please tell me how many wings you’d like (6, 10, or 20).";
+    }
+
+    ticket.items.push(`BBQ Wings (${qtyMatch[0]} pcs)`);
+    ticket.pendingSide = null;
+    ticket.step = "SUMMARY";
+    saveTicket(ticket);
+
+    return buildSummary(ticket);
+  }
+
+  /* =========================
+     SUMMARY & CONFIRMATION
+  ========================= */
+  if (ticket.step === "SUMMARY") {
+    if (msg.includes("yes") || msg.includes("confirm")) {
+      ticket.confirmed = true;
+      ticket.step = "CONFIRMED";
+      saveTicket(ticket);
+
+      return `✅ Order confirmed!
+
+Your order number is **${ticket.id}**  
+Please come to Pizza 64 in about **20 minutes**.
+
+Thank you for ordering 🍕`;
+    }
+
+    if (msg.includes("no")) {
+      ticket.step = "MAIN_ITEM";
+      saveTicket(ticket);
+      return "No problem 👍 What would you like to change?";
+    }
+
+    return "Please reply **Yes** to confirm or **No** to make changes.";
+  }
+
+  /* =========================
+     FALLBACK
+  ========================= */
+  return "Sorry, I didn’t understand that. Please try again.";
 }
 
 /* =========================
-   MENU HELPERS
+   ORDER SUMMARY BUILDER
 ========================= */
+function buildSummary(ticket) {
+  return `
+Here’s your order summary:
 
-function safeArray(x) {
-  return Array.isArray(x) ? x : [];
+${ticket.items.map(i => `• ${i}`).join("\n")}
+
+Order type: ${ticket.orderType}
+
+Would you like to **confirm this order**?
+(Reply Yes / No)
+`;
 }
 
-function normalizeMatch(s) {
-  return lower(s)
-    .replace(/pizza/g, "")
-    .replace(/[^a-z0-9\s]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+// /**
+//  * conversationEngine.js
+//  * JSON-driven, multi-store, no hardcoding
+//  */
 
-function flattenMenu(store) {
-  const out = [];
+// function norm(t) {
+//   return String(t || "").trim();
+// }
+// function lower(t) {
+//   return norm(t).toLowerCase();
+// }
+// function hasAny(t, arr) {
+//   return arr.some(x => t.includes(x));
+// }
 
-  const push = (type, list) => {
-    for (const item of safeArray(list)) {
-      out.push({
-        type,
-        name: item.name,
-        aliases: safeArray(item.aliases).map(normalizeMatch),
-        config: item
-      });
-    }
-  };
+// /* =========================
+//    MENU HELPERS
+// ========================= */
 
-  const m = store.menu || {};
-  push("pizza", Object.values(m.pizzas || {}).flat());
-  push("pasta", m.pastas);
-  push("wings", m.wings);
-  push("side", m.sides);
-  push("beverage", m.beverages);
-  push("salad", m.salads);
+// function safeArray(x) {
+//   return Array.isArray(x) ? x : [];
+// }
 
-  return out;
-}
+// function normalizeMatch(s) {
+//   return lower(s)
+//     .replace(/pizza/g, "")
+//     .replace(/[^a-z0-9\s]/g, "")
+//     .replace(/\s+/g, " ")
+//     .trim();
+// }
 
-/* =========================
-   EXTRACTION
-========================= */
+// function flattenMenu(store) {
+//   const out = [];
 
-function extractItems(store, text) {
-  const t = normalizeMatch(text);
-  const menu = flattenMenu(store);
+//   const push = (type, list) => {
+//     for (const item of safeArray(list)) {
+//       out.push({
+//         type,
+//         name: item.name,
+//         aliases: safeArray(item.aliases).map(normalizeMatch),
+//         config: item
+//       });
+//     }
+//   };
 
-  const found = [];
+//   const m = store.menu || {};
+//   push("pizza", Object.values(m.pizzas || {}).flat());
+//   push("pasta", m.pastas);
+//   push("wings", m.wings);
+//   push("side", m.sides);
+//   push("beverage", m.beverages);
+//   push("salad", m.salads);
 
-  for (const m of menu) {
-    if (m.aliases.some(a => t.includes(a))) {
-      found.push({
-        type: m.type,
-        name: m.name,
-        size: null,
-        spice: null,
-        toppings: [],
-        notes: [],
-        qty: 1
-      });
-    }
-  }
-  return found;
-}
+//   return out;
+// }
 
-function detectSize(text) {
-  const t = lower(text);
-  if (t.includes("large")) return "Large";
-  if (t.includes("medium")) return "Medium";
-  if (t.includes("small")) return "Small";
-  return null;
-}
+// /* =========================
+//    EXTRACTION
+// ========================= */
 
-function detectSpice(text) {
-  const t = lower(text);
-  if (t.includes("mild")) return "Mild";
-  if (t.includes("medium")) return "Medium";
-  if (t.includes("hot") || t.includes("spicy")) return "Hot";
-  return null;
-}
+// function extractItems(store, text) {
+//   const t = normalizeMatch(text);
+//   const menu = flattenMenu(store);
 
-function extractNotes(store, text) {
-  const rules = store.itemTypes?.pizza;
-  if (!rules?.allowedNotes) return [];
+//   const found = [];
 
-  const t = lower(text);
-  return rules.allowedNotes.filter(n => t.includes(n));
-}
+//   for (const m of menu) {
+//     if (m.aliases.some(a => t.includes(a))) {
+//       found.push({
+//         type: m.type,
+//         name: m.name,
+//         size: null,
+//         spice: null,
+//         toppings: [],
+//         notes: [],
+//         qty: 1
+//       });
+//     }
+//   }
+//   return found;
+// }
 
-function extractToppings(store, text) {
-  const t = lower(text);
-  return safeArray(store.menu?.toppings).filter(tp =>
-    t.includes(lower(tp.name))
-  ).map(tp => tp.name);
-}
+// function detectSize(text) {
+//   const t = lower(text);
+//   if (t.includes("large")) return "Large";
+//   if (t.includes("medium")) return "Medium";
+//   if (t.includes("small")) return "Small";
+//   return null;
+// }
 
-/* =========================
-   MAIN ENGINE
-========================= */
+// function detectSpice(text) {
+//   const t = lower(text);
+//   if (t.includes("mild")) return "Mild";
+//   if (t.includes("medium")) return "Medium";
+//   if (t.includes("hot") || t.includes("spicy")) return "Hot";
+//   return null;
+// }
 
-export function getGreetingText(store) {
-  return store.conversation?.greeting ||
-    "Welcome! What would you like to order?";
-}
+// function extractNotes(store, text) {
+//   const rules = store.itemTypes?.pizza;
+//   if (!rules?.allowedNotes) return [];
 
-export function buildConfirmationText(store, session) {
-  const items = session.items.map((i, idx) => {
-    const parts = [
-      `${idx + 1}. ${i.size || ""} ${i.name}`,
-      i.spice ? `(${i.spice})` : "",
-      i.toppings.length ? `Toppings: ${i.toppings.join(", ")}` : "",
-      i.notes.length ? `Notes: ${i.notes.join(", ")}` : ""
-    ];
-    return parts.filter(Boolean).join(" ");
-  });
+//   const t = lower(text);
+//   return rules.allowedNotes.filter(n => t.includes(n));
+// }
 
-  const timeMsg =
-    session.orderType === "Pickup"
-      ? `Pickup in ${store.conversation.pickupTimeMinutes} minutes.`
-      : `Delivery in ${store.conversation.deliveryTimeMinutes} minutes.`;
+// function extractToppings(store, text) {
+//   const t = lower(text);
+//   return safeArray(store.menu?.toppings).filter(tp =>
+//     t.includes(lower(tp.name))
+//   ).map(tp => tp.name);
+// }
 
-  return `Please confirm your order:\n${items.join("\n")}\n${timeMsg}`;
-}
+// /* =========================
+//    MAIN ENGINE
+// ========================= */
 
-export function handleUserTurn(store, session, text) {
-  const msg = lower(text);
+// export function getGreetingText(store) {
+//   return store.conversation?.greeting ||
+//     "Welcome! What would you like to order?";
+// }
 
-  /* 1️⃣ ADD ITEM (TOP PRIORITY) */
-  const items = extractItems(store, msg);
-  if (items.length) {
-    for (const item of items) {
-      item.size = detectSize(msg);
-      item.spice = detectSpice(msg);
-      item.notes = extractNotes(store, msg);
-      item.toppings = extractToppings(store, msg);
-      session.items.push(item);
-    }
-    return { reply: "Pickup or delivery?", session };
-  }
+// export function buildConfirmationText(store, session) {
+//   const items = session.items.map((i, idx) => {
+//     const parts = [
+//       `${idx + 1}. ${i.size || ""} ${i.name}`,
+//       i.spice ? `(${i.spice})` : "",
+//       i.toppings.length ? `Toppings: ${i.toppings.join(", ")}` : "",
+//       i.notes.length ? `Notes: ${i.notes.join(", ")}` : ""
+//     ];
+//     return parts.filter(Boolean).join(" ");
+//   });
 
-  /* 2️⃣ ORDER TYPE */
-  if (hasAny(msg, ["pickup", "pick up"])) {
-    session.orderType = "Pickup";
-    return { reply: store.conversation.pickupMessage || "Would you like any sides or drinks?", session };
-  }
+//   const timeMsg =
+//     session.orderType === "Pickup"
+//       ? `Pickup in ${store.conversation.pickupTimeMinutes} minutes.`
+//       : `Delivery in ${store.conversation.deliveryTimeMinutes} minutes.`;
 
-  if (hasAny(msg, ["delivery", "deliver"])) {
-    session.orderType = "Delivery";
-    return { reply: "Please provide delivery address.", session };
-  }
+//   return `Please confirm your order:\n${items.join("\n")}\n${timeMsg}`;
+// }
 
-  /* 3️⃣ MENU QUESTIONS (ONLY IF NO ITEMS) */
-  if (hasAny(msg, ["menu", "what do you have", "options"])) {
-    return {
-      reply: "We offer pizzas, pastas, wings, sides, salads, and drinks.",
-      session
-    };
-  }
+// export function handleUserTurn(store, session, text) {
+//   const msg = lower(text);
 
-  /* 4️⃣ CONFIRMATION */
-  if (hasAny(msg, ["yes", "confirm", "correct"])) {
-    session.completed = true;
-    return { reply: "Perfect — your order is confirmed. Thank you!", session };
-  }
+//   /* 1️⃣ ADD ITEM (TOP PRIORITY) */
+//   const items = extractItems(store, msg);
+//   if (items.length) {
+//     for (const item of items) {
+//       item.size = detectSize(msg);
+//       item.spice = detectSpice(msg);
+//       item.notes = extractNotes(store, msg);
+//       item.toppings = extractToppings(store, msg);
+//       session.items.push(item);
+//     }
+//     return { reply: "Pickup or delivery?", session };
+//   }
 
-  if (hasAny(msg, ["no", "change"])) {
-    session.items = [];
-    return { reply: "No problem. What would you like to change?", session };
-  }
+//   /* 2️⃣ ORDER TYPE */
+//   if (hasAny(msg, ["pickup", "pick up"])) {
+//     session.orderType = "Pickup";
+//     return { reply: store.conversation.pickupMessage || "Would you like any sides or drinks?", session };
+//   }
 
-  return { reply: "What would you like to order?", session };
-}
+//   if (hasAny(msg, ["delivery", "deliver"])) {
+//     session.orderType = "Delivery";
+//     return { reply: "Please provide delivery address.", session };
+//   }
+
+//   /* 3️⃣ MENU QUESTIONS (ONLY IF NO ITEMS) */
+//   if (hasAny(msg, ["menu", "what do you have", "options"])) {
+//     return {
+//       reply: "We offer pizzas, pastas, wings, sides, salads, and drinks.",
+//       session
+//     };
+//   }
+
+//   /* 4️⃣ CONFIRMATION */
+//   if (hasAny(msg, ["yes", "confirm", "correct"])) {
+//     session.completed = true;
+//     return { reply: "Perfect — your order is confirmed. Thank you!", session };
+//   }
+
+//   if (hasAny(msg, ["no", "change"])) {
+//     session.items = [];
+//     return { reply: "No problem. What would you like to change?", session };
+//   }
+
+//   return { reply: "What would you like to order?", session };
+// }
 
 
 
