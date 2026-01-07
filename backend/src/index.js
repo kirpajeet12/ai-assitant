@@ -192,12 +192,11 @@ app.post("/twilio/voice", (req, res) => {
 
 app.post("/twilio/step", (req, res) => {
   try {
-    const toPhone = req.body.To;        // ⚠️ may be missing on Gather
+    const toPhone = req.body.To;        // may be missing on Gather
     const fromPhone = req.body.From;
     const callSid = req.body.CallSid;
 
-    // 🔑 IMPORTANT FIX:
-    // Reuse store phone saved at call start instead of relying on req.body.To
+    // Reuse store phone saved at call start
     const existingSession = voiceSessions.get(callSid);
 
     const storePhone =
@@ -215,7 +214,7 @@ app.post("/twilio/step", (req, res) => {
     if (!voiceSessions.has(callSid)) {
       voiceSessions.set(callSid, {
         store_id: store.id,
-        store_phone: storePhone,           // ✅ use resolved phone
+        store_phone: storePhone,
         caller: normalizePhone(fromPhone),
 
         orderType: null,
@@ -235,13 +234,13 @@ app.post("/twilio/step", (req, res) => {
     const speech = String(req.body.SpeechResult || "").trim();
 
     if (!speech) {
-      return twilioRespond(res, "Sorry, I didn’t catch that. Please say it again.");
+      return twilioRespond(res, "Sorry, I did not catch that. Please say it again.");
     }
 
     // Pass turn to conversation engine
     const result = handleUserTurn(store, session, speech);
 
-    // If order completed → create ticket + hang up
+    // If order completed, create ticket and hang up
     if (result.session.completed) {
       const summary = buildConfirmationText(store, result.session);
 
@@ -260,7 +259,7 @@ app.post("/twilio/step", (req, res) => {
       const twiml = new twilio.twiml.VoiceResponse();
       twiml.say(
         { voice: "alice", language: "en-CA" },
-        result.reply || "Perfect — your order is confirmed. Thank you!"
+        result.reply || "Perfect - your order is confirmed. Thank you!"
       );
       twiml.hangup();
 
@@ -271,7 +270,7 @@ app.post("/twilio/step", (req, res) => {
     return twilioRespond(res, result.reply);
 
   } catch (err) {
-    console.error("❌ Twilio step error:", err);
+    console.error("Twilio step error:", err);
 
     const twiml = new twilio.twiml.VoiceResponse();
     twiml.say(
@@ -280,7 +279,9 @@ app.post("/twilio/step", (req, res) => {
     );
     twiml.hangup();
 
-    return res.type("text/xml").send(twiml.toString(
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
 
       // Cleanup memory
       voiceSessions.delete(callSid);
