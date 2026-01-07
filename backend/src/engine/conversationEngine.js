@@ -1,17 +1,12 @@
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-/* =========================
-   LOAD ENGINE RULES (JSON)
-========================= */
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const ENGINE_RULES = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "conversationEngine.json"), "utf-8")
-);
+/**
+ * conversationEngine.js
+ * FINAL FIXED VERSION
+ * - Uses store.menu ONLY (no JSON file access)
+ * - Category-driven behavior
+ * - Pasta never triggers pizza
+ * - Size only for pizza
+ * - Strong category locking (lasagna fix)
+ */
 
 /* =========================
    BASIC HELPERS
@@ -22,34 +17,44 @@ const lower = t => norm(t).toLowerCase();
 const hasAny = (t, arr) => arr.some(x => t.includes(x));
 
 /* =========================
-   INTENT DETECTION (JSON)
+   INTENT DETECTION
 ========================= */
 
-function detectIntent(text, intentKey) {
-  return hasAny(lower(text), ENGINE_RULES.intents[intentKey] || []);
+function isMenuQuestion(text) {
+  const t = lower(text);
+  return hasAny(t, [
+    "menu",
+    "what you have",
+    "what do you have",
+    "what do you offer",
+    "anything else",
+    "what else",
+    "show menu"
+  ]);
 }
 
-/* =========================
-   CATEGORY DETECTION (JSON)
-========================= */
-
-function detectCategory(text) {
+/**
+ * STRONG CATEGORY LOCK
+ * If one of these is detected,
+ * ONLY that category is searched
+ */
+function detectStrongCategory(text) {
   const t = lower(text);
-  for (const [cat, cfg] of Object.entries(ENGINE_RULES.categories)) {
-    if (hasAny(t, cfg.keywords || [])) return cat;
-  }
+
+  if (t.includes("lasagna") || t.includes("pasta")) return "pastas";
+  if (t.includes("wing")) return "wings";
+  if (t.includes("side")) return "sides";
+  if (t.includes("drink") || t.includes("beverage")) return "beverages";
+  if (t.includes("salad")) return "salads";
+  if (t.includes("pizza")) return "pizzas";
+
   return null;
 }
 
-/* =========================
-   FILTER DETECTION (veg/chicken)
-========================= */
-
-function detectFilter(text) {
+function detectOrderType(text) {
   const t = lower(text);
-  for (const [filter, words] of Object.entries(ENGINE_RULES.filters)) {
-    if (hasAny(t, words)) return filter;
-  }
+  if (hasAny(t, ["pickup", "pick up", "takeaway"])) return "Pickup";
+  if (hasAny(t, ["delivery", "deliver"])) return "Delivery";
   return null;
 }
 
@@ -64,9 +69,9 @@ function detectQty(text) {
 
 function detectSize(text) {
   const t = lower(text);
-  if (t.includes("small")) return "Small";
-  if (t.includes("medium")) return "Medium";
   if (t.includes("large")) return "Large";
+  if (t.includes("medium")) return "Medium";
+  if (t.includes("small")) return "Small";
   return null;
 }
 
@@ -91,6 +96,9 @@ function normalizeForMatch(s) {
     .trim();
 }
 
+/**
+ * Menu comes ONLY from store.menu
+ */
 function getMenuByCategory(store) {
   const m = store.menu || {};
   return {
@@ -104,25 +112,24 @@ function getMenuByCategory(store) {
 }
 
 /* =========================
-   ITEM EXTRACTION (LOCKED)
+   ITEM EXTRACTION (FINAL FIX)
 ========================= */
 
-function extractItems(store, text, lockedCategory) {
+function extractItems(store, text) {
   const t = normalizeForMatch(text);
   const menu = getMenuByCategory(store);
-  const proteinFilter = detectFilter(text);
 
-  const categories = lockedCategory ? [lockedCategory] : Object.keys(menu);
+  const lockedCategory = detectStrongCategory(text);
+  const categoriesToSearch = lockedCategory
+    ? [lockedCategory]
+    : Object.keys(menu);
+
   const found = [];
 
-  categories.forEach(cat => {
-    const items = menu[cat] || [];
+  categoriesToSearch.forEach(category => {
+    const items = menu[category] || [];
 
     items.forEach(item => {
-      // veg/chicken filter INSIDE category
-      if (proteinFilter === "veg" && item.veg === false) return;
-      if (proteinFilter === "chicken" && item.veg === true) return;
-
       const aliases = [
         normalizeForMatch(item.name),
         ...(item.aliases || []).map(normalizeForMatch)
@@ -131,9 +138,9 @@ function extractItems(store, text, lockedCategory) {
       if (aliases.some(a => a && t.includes(a))) {
         found.push({
           name: item.name,
-          category: cat,
+          category,
           qty: detectQty(text),
-          size: cat === "pizzas" ? detectSize(text) : null,
+          size: category === "pizzas" ? detectSize(text) : null,
           spice: item.requiresSpice ? detectSpice(text) : null,
           requiresSpice: item.requiresSpice === true
         });
@@ -145,18 +152,18 @@ function extractItems(store, text, lockedCategory) {
 }
 
 /* =========================
-   RESPONSES
+   MENU RESPONSES
 ========================= */
 
 function listCategories(store) {
-  return `We offer ${Object.keys(getMenuByCategory(store)).join(", ")}. What would you like to order?`;
+  const cats = Object.keys(getMenuByCategory(store));
+  return `We offer ${cats.join(", ")}. What would you like to order?`;
 }
 
 function listCategory(store, category) {
   const items = getMenuByCategory(store)[category] || [];
-  return items.length
-    ? items.map(i => i.name).join(", ")
-    : `No ${category} available right now.`;
+  if (!items.length) return `No ${category} available right now.`;
+  return items.map(i => i.name).join(", ");
 }
 
 /* =========================
@@ -164,79 +171,64 @@ function listCategory(store, category) {
 ========================= */
 
 export function getGreetingText(store) {
-  return store?.conversation?.greeting || "Welcome! What would you like to order?";
+  return store?.conversation?.greeting ||
+    "Welcome! What would you like to order?";
 }
 
 export function buildConfirmationText(store, session) {
-  const items = session.items.map(i =>
+  const itemsText = session.items.map(i =>
     `${i.qty} ${i.size ? i.size + " " : ""}${i.name}${i.spice ? " (" + i.spice + ")" : ""}`
   ).join(", ");
 
-  return `Please confirm your order. Items: ${items}. Is that correct?`;
+  return `Please confirm your order. Items: ${itemsText}. Is that correct?`;
 }
 
 /* =========================
-   MAIN ENGINE
+   MAIN HANDLER
 ========================= */
 
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  /* 1️⃣ MENU */
-  if (detectIntent(text, "menu")) {
+  // 1️⃣ Menu browsing
+  if (isMenuQuestion(text)) {
     return { reply: listCategories(store), session };
   }
 
-  /* 2️⃣ CONFIRMATION */
-  if (session.confirming) {
-    if (detectIntent(text, "confirm_yes")) {
-      session.completed = true;
-      return { reply: "Perfect — your order is confirmed. Thank you!", session };
-    }
-    if (detectIntent(text, "confirm_no")) {
-      session.confirming = false;
-      session.items = [];
-      return { reply: "No problem. What would you like to change?", session };
-    }
-  }
-
-  /* 3️⃣ CATEGORY BROWSING */
-  const lockedCategory = detectCategory(text);
-  if (lockedCategory && !session.items?.length) {
+  const lockedCategory = detectStrongCategory(text);
+  if (lockedCategory && !extractItems(store, text).length) {
     return { reply: listCategory(store, lockedCategory), session };
   }
 
-  /* 4️⃣ ITEM EXTRACTION (ONCE) */
-  if (!session.items || session.items.length === 0) {
-    const items = extractItems(store, text, lockedCategory);
-    if (items.length) session.items = items;
+  // 2️⃣ Extract items
+  const items = extractItems(store, text);
+  if (items.length) {
+    session.items = items;
   }
 
-  /* 5️⃣ SLOT FILLING */
+  // 3️⃣ Ask missing info
   for (const item of session.items || []) {
-    const rules = ENGINE_RULES.categories[item.category];
-
-    if (rules?.ask?.includes("size") && !item.size) {
+    if (item.category === "pizzas" && !item.size) {
       return { reply: `What size would you like for ${item.name}?`, session };
     }
 
-    if (rules?.ask?.includes("spice") && item.requiresSpice && !item.spice) {
-      return { reply: `What spice level for ${item.name}? Mild, Medium, or Hot?`, session };
+    if (item.requiresSpice && !item.spice) {
+      return {
+        reply: `What spice level for ${item.name}? Mild, Medium, or Hot?`,
+        session
+      };
     }
   }
 
-  /* 6️⃣ ORDER TYPE */
+  // 4️⃣ Order type
   if (session.items?.length && !session.orderType) {
-    if (hasAny(lower(text), ["pickup", "delivery"])) {
-      session.orderType = lower(text).includes("delivery") ? "Delivery" : "Pickup";
-    } else {
-      return { reply: "Pickup or delivery?", session };
-    }
+    const ot = detectOrderType(text);
+    if (!ot) return { reply: "Pickup or delivery?", session };
+    session.orderType = ot;
   }
 
-  /* 7️⃣ CONFIRM */
+  // 5️⃣ Confirmation
   if (session.items?.length) {
-    session.confirming = true;
     return { reply: buildConfirmationText(store, session), session };
   }
 
