@@ -1,11 +1,6 @@
 /**
  * conversationEngine.js
- * FINAL FIXED VERSION
- * - Uses store.menu ONLY (no JSON file access)
- * - Category-driven behavior
- * - Pasta never triggers pizza
- * - Size only for pizza
- * - Strong category locking (lasagna fix)
+ * FINAL STABLE VERSION (NO LOOPS, NO CONFUSION)
  */
 
 /* =========================
@@ -15,6 +10,20 @@
 const norm = t => String(t || "").trim();
 const lower = t => norm(t).toLowerCase();
 const hasAny = (t, arr) => arr.some(x => t.includes(x));
+
+/* =========================
+   CONFIRMATION HELPERS
+========================= */
+
+function isConfirmYes(text) {
+  const t = lower(text);
+  return ["yes", "yep", "yeah", "correct", "confirm", "ok"].includes(t);
+}
+
+function isConfirmNo(text) {
+  const t = lower(text);
+  return ["no", "nope", "wrong", "change"].includes(t);
+}
 
 /* =========================
    INTENT DETECTION
@@ -33,11 +42,6 @@ function isMenuQuestion(text) {
   ]);
 }
 
-/**
- * STRONG CATEGORY LOCK
- * If one of these is detected,
- * ONLY that category is searched
- */
 function detectStrongCategory(text) {
   const t = lower(text);
 
@@ -96,9 +100,6 @@ function normalizeForMatch(s) {
     .trim();
 }
 
-/**
- * Menu comes ONLY from store.menu
- */
 function getMenuByCategory(store) {
   const m = store.menu || {};
   return {
@@ -112,7 +113,7 @@ function getMenuByCategory(store) {
 }
 
 /* =========================
-   ITEM EXTRACTION (FINAL FIX)
+   ITEM EXTRACTION (CATEGORY-LOCKED)
 ========================= */
 
 function extractItems(store, text) {
@@ -120,13 +121,13 @@ function extractItems(store, text) {
   const menu = getMenuByCategory(store);
 
   const lockedCategory = detectStrongCategory(text);
-  const categoriesToSearch = lockedCategory
+  const categories = lockedCategory
     ? [lockedCategory]
     : Object.keys(menu);
 
   const found = [];
 
-  categoriesToSearch.forEach(category => {
+  categories.forEach(category => {
     const items = menu[category] || [];
 
     items.forEach(item => {
@@ -171,8 +172,7 @@ function listCategory(store, category) {
 ========================= */
 
 export function getGreetingText(store) {
-  return store?.conversation?.greeting ||
-    "Welcome! What would you like to order?";
+  return store?.conversation?.greeting || "Welcome! What would you like to order?";
 }
 
 export function buildConfirmationText(store, session) {
@@ -184,13 +184,34 @@ export function buildConfirmationText(store, session) {
 }
 
 /* =========================
-   MAIN HANDLER
+   MAIN CONVERSATION HANDLER
 ========================= */
 
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  // 1️⃣ Menu browsing
+  /* ✅ CONFIRMATION HANDLING (FIXES LOOP) */
+  if (session.confirming) {
+    if (isConfirmYes(text)) {
+      session.completed = true;
+      return {
+        reply: "Perfect — your order is confirmed. Thank you!",
+        session
+      };
+    }
+
+    if (isConfirmNo(text)) {
+      session.confirming = false;
+      return {
+        reply: "No problem. What would you like to change?",
+        session
+      };
+    }
+
+    return { reply: buildConfirmationText(store, session), session };
+  }
+
+  /* 1️⃣ MENU BROWSING */
   if (isMenuQuestion(text)) {
     return { reply: listCategories(store), session };
   }
@@ -200,13 +221,13 @@ export function handleUserTurn(store, session, userText) {
     return { reply: listCategory(store, lockedCategory), session };
   }
 
-  // 2️⃣ Extract items
+  /* 2️⃣ ITEM EXTRACTION */
   const items = extractItems(store, text);
   if (items.length) {
     session.items = items;
   }
 
-  // 3️⃣ Ask missing info
+  /* 3️⃣ ASK MISSING DETAILS */
   for (const item of session.items || []) {
     if (item.category === "pizzas" && !item.size) {
       return { reply: `What size would you like for ${item.name}?`, session };
@@ -220,15 +241,16 @@ export function handleUserTurn(store, session, userText) {
     }
   }
 
-  // 4️⃣ Order type
+  /* 4️⃣ ORDER TYPE */
   if (session.items?.length && !session.orderType) {
     const ot = detectOrderType(text);
     if (!ot) return { reply: "Pickup or delivery?", session };
     session.orderType = ot;
   }
 
-  // 5️⃣ Confirmation
-  if (session.items?.length) {
+  /* 5️⃣ CONFIRM (ONLY ONCE) */
+  if (session.items?.length && !session.confirming) {
+    session.confirming = true;
     return { reply: buildConfirmationText(store, session), session };
   }
 
