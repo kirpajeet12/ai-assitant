@@ -1,84 +1,165 @@
 /**
- * conversationEngine.js (STABLE VERSION)
- * Fixes:
- * - Menu questions
- * - Category ordering (pasta, sides, etc.)
- * - No ghost sides
- * - Proper order reset
+ * conversationEngine.js (FIXED + BROWSE-FIRST VERSION)
+ * - Menu browsing ALWAYS handled before order flow
+ * - Users can ask pizzas / sides / pasta / wings directly
+ * - No auto pickup/delivery until items exist
+ * - No ghost items
  */
 
-function norm(t) { return String(t || "").trim(); }
-function lower(t) { return norm(t).toLowerCase(); }
+/* =========================
+   BASIC HELPERS
+========================= */
 
+function norm(t) {
+  return String(t || "").trim();
+}
+function lower(t) {
+  return norm(t).toLowerCase();
+}
 function hasAny(t, arr) {
   return arr.some(x => t.includes(x));
 }
 
 /* =========================
-   INTENTS
+   MENU / INFO QUESTIONS (CRITICAL FIX)
 ========================= */
 
-function isMenuQuestion(t) {
-  return hasAny(lower(t), [
+function isMenuQuestion(text) {
+  const t = lower(text);
+  return hasAny(t, [
     "menu",
+    "what you have",
     "what do you have",
+    "what do you offer",
     "what are the things you offer",
-    "what else",
     "anything else",
-    "what do you offer"
+    "what else",
+    "other than pizza",
+    "show menu"
   ]);
 }
 
-function isCategoryOnly(t, store) {
-  const cats = Object.keys(store.menu || {});
-  return cats.some(c => lower(t).includes(c));
+function isCategoryQuestion(text) {
+  const t = lower(text);
+  return hasAny(t, [
+    "sides",
+    "drinks",
+    "pasta",
+    "pastas",
+    "wings",
+    "salads",
+    "beverages"
+  ]);
 }
 
-function detectQty(t) {
-  const m = lower(t).match(/\b(\d+)\b/);
-  return m ? parseInt(m[1], 10) : null;
-}
+/* =========================
+   ORDER HELPERS
+========================= */
 
-function detectSize(t) {
-  const s = lower(t);
-  if (s.includes("large")) return "Large";
-  if (s.includes("medium")) return "Medium";
-  if (s.includes("small")) return "Small";
+function detectOrderType(text) {
+  const t = lower(text);
+  if (hasAny(t, ["pickup", "pick up", "takeaway"])) return "Pickup";
+  if (hasAny(t, ["delivery", "deliver"])) return "Delivery";
   return null;
 }
 
-function detectOrderType(t) {
-  const s = lower(t);
-  if (s.includes("pickup")) return "Pickup";
-  if (s.includes("delivery")) return "Delivery";
+function detectSize(text) {
+  const t = lower(text);
+  if (t.includes("large")) return "Large";
+  if (t.includes("medium")) return "Medium";
+  if (t.includes("small")) return "Small";
+  return null;
+}
+
+function detectQty(text) {
+  const m = lower(text).match(/\b(\d+)\b/);
+  if (m) return parseInt(m[1], 10);
+  return 1;
+}
+
+function detectSpice(text) {
+  const t = lower(text);
+  if (t.includes("mild")) return "Mild";
+  if (t.includes("medium")) return "Medium";
+  if (t.includes("hot")) return "Hot";
   return null;
 }
 
 /* =========================
-   MENU HELPERS
+   MENU BUILDERS
 ========================= */
 
-function normalizeMatch(s) {
-  return lower(s).replace(/[^a-z0-9\s]/g, "");
+function safeArr(x) {
+  return Array.isArray(x) ? x : [];
 }
 
-function getAllItems(store) {
-  const out = [];
-  for (const cat of Object.keys(store.menu || {})) {
-    const arr = Array.isArray(store.menu[cat]) ? store.menu[cat] : [];
-    for (const i of arr) {
-      out.push({ ...i, category: cat });
-    }
-  }
-  return out;
+function normalizeForMatch(s) {
+  return lower(s)
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function findItem(store, text) {
-  const t = normalizeMatch(text);
-  return getAllItems(store).find(i => {
-    const names = [i.name, ...(i.aliases || [])];
-    return names.some(n => t.includes(normalizeMatch(n)));
+function getAllMenuItems(store) {
+  const m = store.menu || {};
+  return {
+    pizzas: Object.values(m.pizzas || {}).flat(),
+    sides: safeArr(m.sides),
+    wings: safeArr(m.wings),
+    pastas: safeArr(m.pastas),
+    salads: safeArr(m.salads),
+    beverages: safeArr(m.beverages)
+  };
+}
+
+/* =========================
+   ITEM EXTRACTION
+========================= */
+
+function extractItemsFromText(store, text) {
+  const t = normalizeForMatch(text);
+  const menu = getAllMenuItems(store);
+
+  const results = [];
+
+  Object.entries(menu).forEach(([category, items]) => {
+    items.forEach(item => {
+      const aliases = [
+        normalizeForMatch(item.name),
+        ...(item.aliases || []).map(normalizeForMatch)
+      ];
+
+      if (aliases.some(a => t.includes(a))) {
+        results.push({
+          name: item.name,
+          category,
+          qty: detectQty(text),
+          size: detectSize(text),
+          spice: item.requiresSpice ? detectSpice(text) : null,
+          requiresSpice: item.requiresSpice === true
+        });
+      }
+    });
   });
+
+  return results;
+}
+
+/* =========================
+   MENU RESPONSES
+========================= */
+
+function listCategories(store) {
+  const m = store.menu || {};
+  const cats = Object.keys(m).filter(k => safeArr(m[k]).length || typeof m[k] === "object");
+  return `We offer ${cats.join(", ")}. What would you like to order?`;
+}
+
+function listCategory(store, category) {
+  const menu = getAllMenuItems(store);
+  const items = menu[category] || [];
+  if (!items.length) return `No ${category} available right now.`;
+  return `${category}: ${items.map(i => i.name).join(", ")}`;
 }
 
 /* =========================
@@ -86,13 +167,16 @@ function findItem(store, text) {
 ========================= */
 
 export function getGreetingText(store) {
-  return store.conversation?.greeting || "What would you like to order?";
+  return store?.conversation?.greeting ||
+    "Welcome! What would you like to order?";
 }
 
 export function buildConfirmationText(store, session) {
   const items =
     session.items.length
-      ? session.items.map(i => `${i.qty} ${i.size ? i.size + " " : ""}${i.name}`).join(", ")
+      ? session.items.map(i =>
+          `${i.qty} ${i.size ? i.size + " " : ""}${i.name}${i.spice ? " (" + i.spice + ")" : ""}`
+        ).join(", ")
       : "No items";
 
   const sides =
@@ -106,68 +190,56 @@ export function buildConfirmationText(store, session) {
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  /* Initialize */
-  session.items ??= [];
-  session.sides ??= [];
-
-  /* MENU QUESTIONS */
+  /* 🔴 FIX 1: MENU QUESTIONS FIRST */
   if (isMenuQuestion(text)) {
-    const cats = Object.keys(store.menu);
-    return {
-      reply: `We offer: ${cats.join(", ")}. What would you like to order?`,
-      session
-    };
+    return { reply: listCategories(store), session };
   }
 
-  /* CONFIRMATION */
-  if (session.confirming) {
-    if (lower(text).startsWith("yes")) {
-      session.completed = true;
-      return { reply: "Perfect — your order is confirmed. Thank you!", session };
-    }
-    if (lower(text).startsWith("no")) {
-      session.confirming = false;
-      session.items = [];
-      session.sides = [];
-      return { reply: "No problem. What would you like to order instead?", session };
-    }
+  if (isCategoryQuestion(text)) {
+    if (text.includes("pasta")) return { reply: listCategory(store, "pastas"), session };
+    if (text.includes("wing")) return { reply: listCategory(store, "wings"), session };
+    if (text.includes("side")) return { reply: listCategory(store, "sides"), session };
+    if (text.includes("drink")) return { reply: listCategory(store, "beverages"), session };
   }
 
-  /* ORDER TYPE */
-  const ot = detectOrderType(text);
-  if (ot) session.orderType = ot;
+  /* 🔴 FIX 2: ITEM EXTRACTION */
+  const found = extractItemsFromText(store, text);
 
-  /* ITEM MATCH */
-  const item = findItem(store, text);
-  if (item) {
-    const qty = detectQty(text) || 1;
-    const size = detectSize(text);
+  if (found.length) {
+    session.items = [];
+    session.sides = [];
 
-    if (item.category === "pizzas") {
-      session.items.push({ name: item.name, qty, size });
-    } else {
-      session.sides.push({ name: item.name, qty });
+    found.forEach(i => {
+      if (i.category === "sides" || i.category === "beverages") {
+        session.sides.push({ name: i.name, qty: i.qty });
+      } else {
+        session.items.push(i);
+      }
+    });
+  }
+
+  /* 🔴 FIX 3: ASK FOR SIZE / SPICE ONLY IF ITEM EXISTS */
+  for (let i = 0; i < session.items.length; i++) {
+    if (!session.items[i].size) {
+      return { reply: `What size would you like for ${session.items[i].name}?`, session };
+    }
+    if (session.items[i].requiresSpice && !session.items[i].spice) {
+      return { reply: `What spice level for ${session.items[i].name}? Mild, Medium, or Hot?`, session };
     }
   }
 
-  /* ASK SIZE IF PIZZA */
-  const missingSize = session.items.find(i => !i.size);
-  if (missingSize) {
-    return { reply: "What size would you like? Small, Medium, or Large?", session };
+  /* 🔴 FIX 4: ORDER TYPE ONLY AFTER ITEMS */
+  if (session.items.length && !session.orderType) {
+    const ot = detectOrderType(text);
+    if (!ot) return { reply: "Pickup or delivery?", session };
+    session.orderType = ot;
   }
 
-  /* ASK ORDER TYPE */
-  if (!session.orderType) {
-    return { reply: "Pickup or delivery?", session };
+  /* 🔴 FIX 5: CONFIRMATION */
+  if (session.items.length) {
+    session.confirming = true;
+    return { reply: buildConfirmationText(store, session), session };
   }
 
-  /* ASK SIDES ONCE */
-  if (!session.sidesAsked) {
-    session.sidesAsked = true;
-    return { reply: "Would you like any sides or drinks?", session };
-  }
-
-  /* CONFIRM */
-  session.confirming = true;
-  return { reply: buildConfirmationText(store, session), session };
+  return { reply: "What would you like to order?", session };
 }
