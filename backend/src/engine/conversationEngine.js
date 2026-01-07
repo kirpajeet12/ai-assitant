@@ -1,19 +1,8 @@
-
-
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-/* =========================
-   LOAD ENGINE RULES (JSON)
-========================= */
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const ENGINE_RULES = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "conversationEngine.json"), "utf-8")
-);
+/**
+ * conversationEngine.js
+ * FINAL — SINGLE FILE, NO EXTRA JSON
+ * Category-driven using existing menu.json
+ */
 
 /* =========================
    BASIC HELPERS
@@ -24,39 +13,39 @@ const lower = t => norm(t).toLowerCase();
 const hasAny = (t, arr) => arr.some(x => t.includes(x));
 
 /* =========================
-   INTENT DETECTION (JSON)
+   INTENT HELPERS
 ========================= */
 
-function detectIntent(text, intentKey) {
-  return hasAny(lower(text), ENGINE_RULES.intents[intentKey] || []);
+function isMenuQuestion(text) {
+  return hasAny(lower(text), [
+    "menu",
+    "what you have",
+    "what do you offer",
+    "anything else",
+    "show menu"
+  ]);
+}
+
+function isVegQuestion(text) {
+  return hasAny(lower(text), [
+    "veg option",
+    "veggie option",
+    "vegetarian",
+    "veg pizzas",
+    "which are veggie"
+  ]);
+}
+
+function isConfirmYes(text) {
+  return hasAny(lower(text), ["yes", "yeah", "yep", "correct", "right", "ok"]);
+}
+
+function isConfirmNo(text) {
+  return hasAny(lower(text), ["no", "wrong", "change", "not correct"]);
 }
 
 /* =========================
-   CATEGORY DETECTION (JSON)
-========================= */
-
-function detectCategory(text) {
-  const t = lower(text);
-  for (const [cat, cfg] of Object.entries(ENGINE_RULES.categories)) {
-    if (hasAny(t, cfg.keywords || [])) return cat;
-  }
-  return null;
-}
-
-/* =========================
-   FILTER DETECTION (veg/chicken)
-========================= */
-
-function detectFilter(text) {
-  const t = lower(text);
-  for (const [filter, words] of Object.entries(ENGINE_RULES.filters)) {
-    if (hasAny(t, words)) return filter;
-  }
-  return null;
-}
-
-/* =========================
-   VALUE EXTRACTION
+   VALUE DETECTION
 ========================= */
 
 function detectQty(text) {
@@ -77,6 +66,20 @@ function detectSpice(text) {
   if (t.includes("mild")) return "Mild";
   if (t.includes("medium")) return "Medium";
   if (t.includes("hot")) return "Hot";
+  return null;
+}
+
+function detectOrderType(text) {
+  const t = lower(text);
+  if (t.includes("pickup")) return "Pickup";
+  if (t.includes("delivery")) return "Delivery";
+  return null;
+}
+
+function detectProtein(text) {
+  const t = lower(text);
+  if (t.includes("chicken")) return "chicken";
+  if (t.includes("veg") || t.includes("veggie")) return "veg";
   return null;
 }
 
@@ -106,24 +109,39 @@ function getMenuByCategory(store) {
 }
 
 /* =========================
-   ITEM EXTRACTION (LOCKED)
+   CATEGORY LOCK (CRITICAL)
+========================= */
+
+function detectCategoryLock(text) {
+  const t = lower(text);
+  if (t.includes("lasagna") || t.includes("pasta")) return "pastas";
+  if (t.includes("pizza")) return "pizzas";
+  if (t.includes("wing")) return "wings";
+  if (t.includes("side")) return "sides";
+  if (t.includes("drink") || t.includes("beverage")) return "beverages";
+  return null;
+}
+
+/* =========================
+   ITEM EXTRACTION (SAFE)
 ========================= */
 
 function extractItems(store, text, lockedCategory) {
   const t = normalizeForMatch(text);
   const menu = getMenuByCategory(store);
-  const proteinFilter = detectFilter(text);
+  const protein = detectProtein(text);
 
-  const categories = lockedCategory ? [lockedCategory] : Object.keys(menu);
+  const categories = lockedCategory
+    ? [lockedCategory]
+    : Object.keys(menu);
+
   const found = [];
 
   categories.forEach(cat => {
-    const items = menu[cat] || [];
-
-    items.forEach(item => {
-      // veg/chicken filter INSIDE category
-      if (proteinFilter === "veg" && item.veg === false) return;
-      if (proteinFilter === "chicken" && item.veg === true) return;
+    menu[cat].forEach(item => {
+      // protein filter INSIDE category
+      if (protein === "veg" && item.veg === false) return;
+      if (protein === "chicken" && item.veg === true) return;
 
       const aliases = [
         normalizeForMatch(item.name),
@@ -184,18 +202,30 @@ export function buildConfirmationText(store, session) {
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  /* 1️⃣ MENU */
-  if (detectIntent(text, "menu")) {
+  /* 1️⃣ MENU / INFO */
+  if (isMenuQuestion(text)) {
     return { reply: listCategories(store), session };
+  }
+
+  if (isVegQuestion(text)) {
+    const vegPizzas = getMenuByCategory(store)
+      .pizzas
+      .filter(p => p.veg === true)
+      .map(p => p.name);
+
+    return {
+      reply: `Vegetarian pizzas: ${vegPizzas.join(", ")}`,
+      session
+    };
   }
 
   /* 2️⃣ CONFIRMATION */
   if (session.confirming) {
-    if (detectIntent(text, "confirm_yes")) {
+    if (isConfirmYes(text)) {
       session.completed = true;
       return { reply: "Perfect — your order is confirmed. Thank you!", session };
     }
-    if (detectIntent(text, "confirm_no")) {
+    if (isConfirmNo(text)) {
       session.confirming = false;
       session.items = [];
       return { reply: "No problem. What would you like to change?", session };
@@ -203,12 +233,12 @@ export function handleUserTurn(store, session, userText) {
   }
 
   /* 3️⃣ CATEGORY BROWSING */
-  const lockedCategory = detectCategory(text);
-  if (lockedCategory && !session.items?.length) {
+  const lockedCategory = detectCategoryLock(text);
+  if (lockedCategory && (!session.items || session.items.length === 0)) {
     return { reply: listCategory(store, lockedCategory), session };
   }
 
-  /* 4️⃣ ITEM EXTRACTION (ONCE) */
+  /* 4️⃣ ITEM EXTRACTION (ONLY ONCE) */
   if (!session.items || session.items.length === 0) {
     const items = extractItems(store, text, lockedCategory);
     if (items.length) session.items = items;
@@ -216,24 +246,19 @@ export function handleUserTurn(store, session, userText) {
 
   /* 5️⃣ SLOT FILLING */
   for (const item of session.items || []) {
-    const rules = ENGINE_RULES.categories[item.category];
-
-    if (rules?.ask?.includes("size") && !item.size) {
+    if (item.category === "pizzas" && !item.size) {
       return { reply: `What size would you like for ${item.name}?`, session };
     }
-
-    if (rules?.ask?.includes("spice") && item.requiresSpice && !item.spice) {
+    if (item.requiresSpice && !item.spice) {
       return { reply: `What spice level for ${item.name}? Mild, Medium, or Hot?`, session };
     }
   }
 
   /* 6️⃣ ORDER TYPE */
   if (session.items?.length && !session.orderType) {
-    if (hasAny(lower(text), ["pickup", "delivery"])) {
-      session.orderType = lower(text).includes("delivery") ? "Delivery" : "Pickup";
-    } else {
-      return { reply: "Pickup or delivery?", session };
-    }
+    const ot = detectOrderType(text);
+    if (!ot) return { reply: "Pickup or delivery?", session };
+    session.orderType = ot;
   }
 
   /* 7️⃣ CONFIRM */
