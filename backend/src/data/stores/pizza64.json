@@ -4,7 +4,9 @@
   "name": "Pizza 64 (Surrey 132nd)",
   "phone": "+12183963550",
   "conversation": {
-    "greeting": "welcome. What would you like to order?."
+    "greeting": "welcome its pizza 64 ai. What would you like to order?."
+    "pickupTimeMinutes": 20,
+  "deliveryTimeMinutes": 35
   },
   "settings": {
     "supportedSizes": ["Small", "Medium", "Large"],
