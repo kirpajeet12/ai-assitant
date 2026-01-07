@@ -1,243 +1,426 @@
-/**
- * conversationEngine.js (FIXED & STABLE)
- * - Category-aware (pizza / pasta / sides / wings)
- * - No menu spam loops
- * - No size asked for non-pizza items
- * - Confirmation loop fixed
- */
+import { extractMeaning } from "../services/aiService.js";
 
 /* =========================
-   HELPERS
+   GREETING
 ========================= */
-
-const norm = (t) => String(t || "").trim();
-const lower = (t) => norm(t).toLowerCase();
-const hasAny = (t, arr) => arr.some((x) => t.includes(x));
-
-/* =========================
-   BASIC DETECTORS
-========================= */
-
-function isConfirmYes(text) {
-  return /^(yes|y|yeah|yep|confirm|correct|ok)$/i.test(lower(text));
-}
-
-function isConfirmNo(text) {
-  return hasAny(lower(text), ["no", "wrong", "change", "edit"]);
-}
-
-function detectOrderType(text) {
-  const t = lower(text);
-  if (hasAny(t, ["pickup", "pick up", "carryout"])) return "Pickup";
-  if (hasAny(t, ["delivery", "deliver"])) return "Delivery";
-  return null;
-}
-
-function detectSize(text) {
-  const t = lower(text);
-  if (t.includes("large") || /\bl\b/.test(t)) return "Large";
-  if (t.includes("medium") || /\bm\b/.test(t)) return "Medium";
-  if (t.includes("small") || /\bs\b/.test(t)) return "Small";
-  return null;
-}
-
-function detectQty(text) {
-  const m = lower(text).match(/\b(\d+)\b/);
-  return m ? parseInt(m[1], 10) : 1;
-}
-
-function detectSpice(text) {
-  const t = lower(text);
-  if (hasAny(t, ["mild"])) return "Mild";
-  if (hasAny(t, ["medium"])) return "Medium";
-  if (hasAny(t, ["hot", "spicy"])) return "Hot";
-  return null;
-}
-
-/* =========================
-   MENU HELPERS
-========================= */
-
-function normalizeName(s) {
-  return lower(s)
-    .replace(/pizza/g, "")
-    .replace(/[^a-z0-9 ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function getAllItems(store) {
-  const out = [];
-
-  const menu = store.menu || {};
-
-  // PIZZAS
-  for (const cat of Object.keys(menu.pizzas || {})) {
-    for (const p of menu.pizzas[cat]) {
-      out.push({
-        type: "pizza",
-        name: p.name,
-        requiresSpice: p.requiresSpice,
-        aliases: p.aliases || []
-      });
-    }
-  }
-
-  // PASTAS
-  for (const p of menu.pastas || []) {
-    out.push({ type: "pasta", name: p.name, aliases: p.aliases || [] });
-  }
-
-  // SIDES
-  for (const s of menu.sides || []) {
-    out.push({ type: "side", name: s.name, aliases: s.aliases || [] });
-  }
-
-  // WINGS
-  for (const w of menu.wings || []) {
-    out.push({ type: "wings", name: w.name, aliases: w.aliases || [] });
-  }
-
-  return out;
-}
-
-/* =========================
-   ITEM EXTRACTION (KEY FIX)
-========================= */
-
-function extractItems(store, text) {
-  const t = normalizeName(text);
-  const items = [];
-
-  for (const item of getAllItems(store)) {
-    const names = [
-      normalizeName(item.name),
-      ...item.aliases.map(normalizeName)
-    ];
-
-    if (names.some((n) => t.includes(n))) {
-      items.push({
-        name: item.name,
-        type: item.type,
-        qty: detectQty(text),
-        size: item.type === "pizza" ? detectSize(text) : null,
-        spice: item.requiresSpice ? detectSpice(text) : null,
-        requiresSpice: item.requiresSpice || false
-      });
-    }
-  }
-
-  return items;
-}
-
-/* =========================
-   MENU QUESTIONS (SAFE)
-========================= */
-
-function isMenuQuestion(text) {
-  return hasAny(lower(text), [
-    "menu",
-    "what you have",
-    "what do you have",
-    "what do you offer",
-    "anything else",
-    "show menu"
-  ]);
-}
-
-function listCategories(store) {
-  return "We offer pizzas, pastas, sides, wings, salads, and beverages. What would you like?";
-}
-
-function listCategory(store, key, label) {
-  const items = (store.menu[key] || []).map((x) => x.name);
-  return items.length ? `${label}: ${items.join(", ")}` : `No ${label.toLowerCase()} available.`;
-}
-
-/* =========================
-   PUBLIC API
-========================= */
-
 export function getGreetingText(store) {
-  return store?.conversation?.greeting || "What would you like to order?";
+  return (
+    store?.conversation?.greeting ||
+    "Welcome. What would you like to order?"
+  );
 }
 
+/* =========================
+   CONFIRMATION TEXT
+========================= */
 export function buildConfirmationText(store, session) {
-  const items = session.items
+  if (!session.items || session.items.length === 0) {
+    return "I don’t see any items in your order yet. What would you like to order?";
+  }
+
+  const itemsText = session.items
     .map((i) => {
+      const qty = i.qty || 1;
       const size = i.size ? `${i.size} ` : "";
       const spice = i.spice ? ` (${i.spice})` : "";
-      return `${i.qty} ${size}${i.name}${spice}`.trim();
+      return `${qty} ${size}${i.name}${spice}`.replace(/\s+/g, " ").trim();
     })
     .join(", ");
 
-  return `Please confirm your order. Items: ${items}. Is that correct?`;
+  return `Please confirm your order. Items: ${itemsText}. Is that correct?`;
 }
 
 /* =========================
-   CORE ENGINE
+   CORE ENGINE (GPT + RULES)
 ========================= */
+export async function handleUserTurn(store, session, userText) {
+  session.items = session.items || [];
+  session.expecting = session.expecting || null;
 
-export function handleUserTurn(store, session, userText) {
-  const text = norm(userText);
+  /* =========================
+     1️⃣ GPT INTERPRETATION
+  ========================= */
+  const meaning = await extractMeaning(store, userText, session);
 
-  /* ✅ Confirmation handling */
-  if (session.confirming) {
-    if (isConfirmYes(text)) {
-      session.completed = true;
-      return { reply: "Perfect — your order is confirmed. Thank you!", session };
+  /* =========================
+     2️⃣ CONFIRMATION HANDLING
+  ========================= */
+  if (meaning.intent === "confirm_yes") {
+    if (session.items.length === 0) {
+      return { reply: "What would you like to order?", session };
     }
-    if (isConfirmNo(text)) {
-      session.confirming = false;
-      session.items = [];
-      return { reply: "No problem. What would you like to change?", session };
-    }
+    session.completed = true;
+    return {
+      reply: "Perfect — your order is confirmed. Thank you!",
+      session
+    };
   }
 
-  /* ✅ Extract items FIRST (CRITICAL FIX) */
-  const items = extractItems(store, text);
-
-  /* ✅ Menu only if NO items */
-  if (isMenuQuestion(text) && items.length === 0) {
-    return { reply: listCategories(store), session };
+  if (meaning.intent === "confirm_no") {
+    session.confirming = false;
+    session.items = [];
+    return {
+      reply: "No problem. What would you like to change or order instead?",
+      session
+    };
   }
 
-  /* ✅ Save items */
-  if (items.length) {
-    session.items = items;
+  /* =========================
+     3️⃣ MENU QUESTIONS
+  ========================= */
+  if (meaning.intent === "ask_menu") {
+    return {
+      reply: "We offer pizzas, pastas, wings, sides, salads, and beverages. What would you like?",
+      session
+    };
   }
 
-  /* ✅ Order type */
-  const ot = detectOrderType(text);
-  if (ot) session.orderType = ot;
-
-  /* ✅ Size missing (pizza only) */
-  for (let i = 0; i < (session.items || []).length; i++) {
-    const it = session.items[i];
-    if (it.type === "pizza" && !it.size) {
-      session.awaiting = { type: "size", index: i };
-      return { reply: `What size would you like for ${it.name}?`, session };
-    }
+  if (meaning.intent === "ask_sides") {
+    const sides =
+      store.menu?.sides?.map((s) => s.name).join(", ") ||
+      "No sides available right now.";
+    return {
+      reply: `Sides available: ${sides}`,
+      session
+    };
   }
 
-  /* ✅ Spice missing */
-  for (let i = 0; i < (session.items || []).length; i++) {
-    const it = session.items[i];
-    if (it.requiresSpice && !it.spice) {
-      session.awaiting = { type: "spice", index: i };
-      return { reply: `What spice level for ${it.name}? Mild, Medium, or Hot?`, session };
-    }
+  /* =========================
+     4️⃣ ADD ITEMS
+  ========================= */
+  if (meaning.intent === "add_item" && meaning.items.length > 0) {
+    session.items = meaning.items.map((i) => ({
+      name: i.name,
+      qty: i.qty || 1,
+      size: i.size || null,
+      spice: i.spice || null,
+      type: detectItemType(store, i.name),
+      requiresSpice: i.spice !== null
+    }));
   }
 
-  /* ✅ Order type ask */
+  /* =========================
+     5️⃣ UPDATE MISSING SLOT
+  ========================= */
+  if (meaning.intent === "update_item" && session.items.length > 0) {
+    const item = session.items[0]; // single-item flow for now
+    if (meaning.itemUpdates?.size) item.size = meaning.itemUpdates.size;
+    if (meaning.itemUpdates?.spice) item.spice = meaning.itemUpdates.spice;
+    if (meaning.itemUpdates?.qty) item.qty = meaning.itemUpdates.qty;
+  }
+
+  /* =========================
+     6️⃣ SLOT FILLING (RULED)
+  ========================= */
+  const item = session.items[0];
+
+  if (!item) {
+    return { reply: "What would you like to order?", session };
+  }
+
+  // Size ONLY for pizza
+  if (item.type === "pizza" && !item.size) {
+    session.expecting = "size";
+    return {
+      reply: `What size would you like for ${item.name}? Small, Medium, or Large?`,
+      session
+    };
+  }
+
+  // Spice ONLY if required
+  if (item.requiresSpice && !item.spice) {
+    session.expecting = "spice";
+    return {
+      reply: `What spice level would you like? Mild, Medium, or Hot?`,
+      session
+    };
+  }
+
+  /* =========================
+     7️⃣ ORDER TYPE
+  ========================= */
+  if (meaning.intent === "set_order_type") {
+    session.orderType = meaning.orderType;
+  }
+
   if (!session.orderType) {
-    return { reply: "Pickup or delivery?", session };
+    session.expecting = "orderType";
+    return {
+      reply: "Pickup or delivery?",
+      session
+    };
   }
 
-  /* ✅ Final confirmation */
+  /* =========================
+     8️⃣ FINAL CONFIRMATION
+  ========================= */
   session.confirming = true;
-  return { reply: buildConfirmationText(store, session), session };
+  session.expecting = null;
+  return {
+    reply: buildConfirmationText(store, session),
+    session
+  };
 }
+
+/* =========================
+   HELPER: ITEM TYPE
+========================= */
+function detectItemType(store, itemName) {
+  const name = itemName.toLowerCase();
+
+  for (const cat of Object.keys(store.menu?.pizzas || {})) {
+    if (store.menu.pizzas[cat].some((p) => p.name.toLowerCase() === name)) {
+      return "pizza";
+    }
+  }
+
+  if (store.menu?.pastas?.some((p) => p.name.toLowerCase() === name)) return "pasta";
+  if (store.menu?.wings?.some((p) => p.name.toLowerCase() === name)) return "wings";
+  if (store.menu?.sides?.some((p) => p.name.toLowerCase() === name)) return "side";
+
+  return "other";
+}
+
+// /**
+//  * conversationEngine.js (FIXED & STABLE)
+//  * - Category-aware (pizza / pasta / sides / wings)
+//  * - No menu spam loops
+//  * - No size asked for non-pizza items
+//  * - Confirmation loop fixed
+//  */
+
+// /* =========================
+//    HELPERS
+// ========================= */
+
+// const norm = (t) => String(t || "").trim();
+// const lower = (t) => norm(t).toLowerCase();
+// const hasAny = (t, arr) => arr.some((x) => t.includes(x));
+
+// /* =========================
+//    BASIC DETECTORS
+// ========================= */
+
+// function isConfirmYes(text) {
+//   return /^(yes|y|yeah|yep|confirm|correct|ok)$/i.test(lower(text));
+// }
+
+// function isConfirmNo(text) {
+//   return hasAny(lower(text), ["no", "wrong", "change", "edit"]);
+// }
+
+// function detectOrderType(text) {
+//   const t = lower(text);
+//   if (hasAny(t, ["pickup", "pick up", "carryout"])) return "Pickup";
+//   if (hasAny(t, ["delivery", "deliver"])) return "Delivery";
+//   return null;
+// }
+
+// function detectSize(text) {
+//   const t = lower(text);
+//   if (t.includes("large") || /\bl\b/.test(t)) return "Large";
+//   if (t.includes("medium") || /\bm\b/.test(t)) return "Medium";
+//   if (t.includes("small") || /\bs\b/.test(t)) return "Small";
+//   return null;
+// }
+
+// function detectQty(text) {
+//   const m = lower(text).match(/\b(\d+)\b/);
+//   return m ? parseInt(m[1], 10) : 1;
+// }
+
+// function detectSpice(text) {
+//   const t = lower(text);
+//   if (hasAny(t, ["mild"])) return "Mild";
+//   if (hasAny(t, ["medium"])) return "Medium";
+//   if (hasAny(t, ["hot", "spicy"])) return "Hot";
+//   return null;
+// }
+
+// /* =========================
+//    MENU HELPERS
+// ========================= */
+
+// function normalizeName(s) {
+//   return lower(s)
+//     .replace(/pizza/g, "")
+//     .replace(/[^a-z0-9 ]/g, "")
+//     .replace(/\s+/g, " ")
+//     .trim();
+// }
+
+// function getAllItems(store) {
+//   const out = [];
+
+//   const menu = store.menu || {};
+
+//   // PIZZAS
+//   for (const cat of Object.keys(menu.pizzas || {})) {
+//     for (const p of menu.pizzas[cat]) {
+//       out.push({
+//         type: "pizza",
+//         name: p.name,
+//         requiresSpice: p.requiresSpice,
+//         aliases: p.aliases || []
+//       });
+//     }
+//   }
+
+//   // PASTAS
+//   for (const p of menu.pastas || []) {
+//     out.push({ type: "pasta", name: p.name, aliases: p.aliases || [] });
+//   }
+
+//   // SIDES
+//   for (const s of menu.sides || []) {
+//     out.push({ type: "side", name: s.name, aliases: s.aliases || [] });
+//   }
+
+//   // WINGS
+//   for (const w of menu.wings || []) {
+//     out.push({ type: "wings", name: w.name, aliases: w.aliases || [] });
+//   }
+
+//   return out;
+// }
+
+// /* =========================
+//    ITEM EXTRACTION (KEY FIX)
+// ========================= */
+
+// function extractItems(store, text) {
+//   const t = normalizeName(text);
+//   const items = [];
+
+//   for (const item of getAllItems(store)) {
+//     const names = [
+//       normalizeName(item.name),
+//       ...item.aliases.map(normalizeName)
+//     ];
+
+//     if (names.some((n) => t.includes(n))) {
+//       items.push({
+//         name: item.name,
+//         type: item.type,
+//         qty: detectQty(text),
+//         size: item.type === "pizza" ? detectSize(text) : null,
+//         spice: item.requiresSpice ? detectSpice(text) : null,
+//         requiresSpice: item.requiresSpice || false
+//       });
+//     }
+//   }
+
+//   return items;
+// }
+
+// /* =========================
+//    MENU QUESTIONS (SAFE)
+// ========================= */
+
+// function isMenuQuestion(text) {
+//   return hasAny(lower(text), [
+//     "menu",
+//     "what you have",
+//     "what do you have",
+//     "what do you offer",
+//     "anything else",
+//     "show menu"
+//   ]);
+// }
+
+// function listCategories(store) {
+//   return "We offer pizzas, pastas, sides, wings, salads, and beverages. What would you like?";
+// }
+
+// function listCategory(store, key, label) {
+//   const items = (store.menu[key] || []).map((x) => x.name);
+//   return items.length ? `${label}: ${items.join(", ")}` : `No ${label.toLowerCase()} available.`;
+// }
+
+// /* =========================
+//    PUBLIC API
+// ========================= */
+
+// export function getGreetingText(store) {
+//   return store?.conversation?.greeting || "What would you like to order?";
+// }
+
+// export function buildConfirmationText(store, session) {
+//   const items = session.items
+//     .map((i) => {
+//       const size = i.size ? `${i.size} ` : "";
+//       const spice = i.spice ? ` (${i.spice})` : "";
+//       return `${i.qty} ${size}${i.name}${spice}`.trim();
+//     })
+//     .join(", ");
+
+//   return `Please confirm your order. Items: ${items}. Is that correct?`;
+// }
+
+// /* =========================
+//    CORE ENGINE
+// ========================= */
+
+// export function handleUserTurn(store, session, userText) {
+//   const text = norm(userText);
+
+//   /* ✅ Confirmation handling */
+//   if (session.confirming) {
+//     if (isConfirmYes(text)) {
+//       session.completed = true;
+//       return { reply: "Perfect — your order is confirmed. Thank you!", session };
+//     }
+//     if (isConfirmNo(text)) {
+//       session.confirming = false;
+//       session.items = [];
+//       return { reply: "No problem. What would you like to change?", session };
+//     }
+//   }
+
+//   /* ✅ Extract items FIRST (CRITICAL FIX) */
+//   const items = extractItems(store, text);
+
+//   /* ✅ Menu only if NO items */
+//   if (isMenuQuestion(text) && items.length === 0) {
+//     return { reply: listCategories(store), session };
+//   }
+
+//   /* ✅ Save items */
+//   if (items.length) {
+//     session.items = items;
+//   }
+
+//   /* ✅ Order type */
+//   const ot = detectOrderType(text);
+//   if (ot) session.orderType = ot;
+
+//   /* ✅ Size missing (pizza only) */
+//   for (let i = 0; i < (session.items || []).length; i++) {
+//     const it = session.items[i];
+//     if (it.type === "pizza" && !it.size) {
+//       session.awaiting = { type: "size", index: i };
+//       return { reply: `What size would you like for ${it.name}?`, session };
+//     }
+//   }
+
+//   /* ✅ Spice missing */
+//   for (let i = 0; i < (session.items || []).length; i++) {
+//     const it = session.items[i];
+//     if (it.requiresSpice && !it.spice) {
+//       session.awaiting = { type: "spice", index: i };
+//       return { reply: `What spice level for ${it.name}? Mild, Medium, or Hot?`, session };
+//     }
+//   }
+
+//   /* ✅ Order type ask */
+//   if (!session.orderType) {
+//     return { reply: "Pickup or delivery?", session };
+//   }
+
+//   /* ✅ Final confirmation */
+//   session.confirming = true;
+//   return { reply: buildConfirmationText(store, session), session };
+// }
 
 // /**
 //  * conversationEngine.js
