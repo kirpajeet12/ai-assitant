@@ -2,33 +2,27 @@
  * src/index.js
  *
  * What this file does:
- * 1) Twilio Voice endpoints:
- *    - POST /twilio/voice  (call starts)
- *    - POST /twilio/step   (each user speech turn)
- * 2) Web chat testing endpoints:
- *    - POST /api/chat/start
- *    - POST /api/chat/message
- * 3) Dashboard static hosting:
- *    - /dashboard/*
+ * 1) Twilio Voice endpoints
+ * 2) Web chat endpoints
+ * 3) Dashboard static hosting
  *
  * IMPORTANT:
- * - Both voice + web chat use the SAME conversation engine.
- * - That means behavior is consistent during testing.
+ * - Voice + web chat use SAME conversation engine
  */
 
-import "dotenv/config"; // Loads .env variables
-import express from "express"; // Web server
-import cors from "cors"; // Allow cross-origin calls
-import path from "path"; // Paths
-import twilio from "twilio"; // Twilio helper to build TwiML
-import { fileURLToPath } from "url"; // For __dirname in ESM
-import crypto from "crypto"; // Create random chat session ids
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import path from "path";
+import twilio from "twilio";
+import { fileURLToPath } from "url";
+import crypto from "crypto";
 
-// Your services
+// Services
 import { getStoreByPhone } from "./services/storeService.js";
 import { createTicket, getTicketsByStore } from "./services/ticketService.js";
 
-// Our engine (script/slot-filling)
+// Engine (NOW ASYNC)
 import {
   getGreetingText,
   handleUserTurn,
@@ -39,94 +33,45 @@ import {
    BASIC SETUP
 ========================= */
 
-// ESM-safe __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Create express app
 const app = express();
-
-// Allow local testing + dashboard access
 app.use(cors());
-
-// Twilio sends URL-encoded body
 app.use(express.urlencoded({ extended: false }));
-
-// Dashboard/chat uses JSON
 app.use(express.json());
-
-// Static dashboard folder
 app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
 
-// Port from Render (or local)
 const PORT = process.env.PORT || 10000;
 
 /* =========================
    IN-MEMORY SESSIONS
 ========================= */
 
-/**
- * Voice sessions:
- * - key: CallSid
- * - value: session object
- */
 const voiceSessions = new Map();
-
-/**
- * Chat sessions:
- * - key: sessionId
- * - value: { store, session }
- */
 const chatSessions = new Map();
 
-/**
- * Default store phone for chat testing
- * - if user leaves storePhone empty in chat UI, we use this.
- */
 const DEFAULT_STORE_PHONE = (process.env.DEFAULT_STORE_PHONE || "").trim();
 
 /* =========================
    PHONE NORMALIZATION
 ========================= */
 
-/**
- * Normalize phone so your store lookup works more reliably.
- * Example:
- * - "+1 (604) 123-4567" -> "+16041234567"
- * - "16041234567"       -> "+16041234567" (if looks like NA number)
- */
 function normalizePhone(input) {
   const raw = String(input || "").trim();
   if (!raw) return "";
 
-  // Keep digits + leading plus
   const digits = raw.replace(/[^\d+]/g, "");
-
-  // If it already starts with + and has digits, keep it
   if (digits.startsWith("+")) return digits;
-
-  // If it looks like 11 digits starting with 1, treat as +1...
   if (/^1\d{10}$/.test(digits)) return `+${digits}`;
-
-  // If it looks like 10 digits, treat as North America +1
   if (/^\d{10}$/.test(digits)) return `+1${digits}`;
-
-  // Otherwise just return digits (better than nothing)
   return digits;
 }
 
-/* =========================
-   STORE LOOKUP
-========================= */
-
 function safeGetStoreByPhone(phoneMaybe) {
-  // Use provided phone if present; else fallback to DEFAULT_STORE_PHONE
-  const phone = normalizePhone(phoneMaybe) || normalizePhone(DEFAULT_STORE_PHONE);
-
-  // If still empty, we cannot lookup
+  const phone =
+    normalizePhone(phoneMaybe) || normalizePhone(DEFAULT_STORE_PHONE);
   if (!phone) return null;
-
-  // Your storeService should match based on phone
   return getStoreByPhone(phone);
 }
 
@@ -135,46 +80,35 @@ function safeGetStoreByPhone(phoneMaybe) {
 ========================= */
 
 app.post("/twilio/voice", (req, res) => {
-  // Twilio usually provides To/From/CallSid
-  const toPhone = req.body.To; // store number
-  const fromPhone = req.body.From; // caller
-  const callSid = req.body.CallSid; // unique call id
+  const toPhone = req.body.To;
+  const fromPhone = req.body.From;
+  const callSid = req.body.CallSid;
 
-  // Find store config
   const store = safeGetStoreByPhone(toPhone);
-
-  // Build TwiML response
   const twiml = new twilio.twiml.VoiceResponse();
 
-  // Create voice session if store is found
   if (store && !voiceSessions.has(callSid)) {
     voiceSessions.set(callSid, {
       store_id: store.id,
       store_phone: normalizePhone(toPhone),
       caller: normalizePhone(fromPhone),
-
-      // Order state
-      orderType: null,     // "Pickup" | "Delivery"
-      address: null,       // required for delivery
-      customerName: null,  // optional
-      items: [],           // pizzas
-      sides: [],           // sides/drinks
-
-      // Flow control
-      awaiting: null,      // e.g. { type: "size", itemIndex: 0 }
-      confirming: false,   // true when we are asking final confirm
-      completed: false     // true after confirmed
+      orderType: null,
+      address: null,
+      customerName: null,
+      items: [],
+      sides: [],
+      awaiting: null,
+      confirming: false,
+      completed: false
     });
   }
 
-  // If store not found, still respond gracefully
   const greeting = store
     ? getGreetingText(store)
-    : "Hi! This store is not configured yet. Please contact the shop owner.";
+    : "Hi! This store is not configured yet.";
 
   twiml.say({ voice: "alice", language: "en-CA" }, greeting);
 
-  // Gather speech
   twiml.gather({
     input: "speech",
     language: "en-CA",
@@ -187,18 +121,16 @@ app.post("/twilio/voice", (req, res) => {
 });
 
 /* =========================
-   TWILIO: STEP
+   TWILIO: STEP (FIXED)
 ========================= */
 
-app.post("/twilio/step", (req, res) => {
+app.post("/twilio/step", async (req, res) => {
   try {
-    const toPhone = req.body.To;        // may be missing on Gather
+    const toPhone = req.body.To;
     const fromPhone = req.body.From;
     const callSid = req.body.CallSid;
 
-    // Reuse store phone saved at call start
     const existingSession = voiceSessions.get(callSid);
-
     const storePhone =
       existingSession?.store_phone ||
       normalizePhone(toPhone) ||
@@ -210,13 +142,11 @@ app.post("/twilio/step", (req, res) => {
       return twilioRespond(res, "Sorry, this store is not configured yet.");
     }
 
-    // Ensure session exists
     if (!voiceSessions.has(callSid)) {
       voiceSessions.set(callSid, {
         store_id: store.id,
         store_phone: storePhone,
         caller: normalizePhone(fromPhone),
-
         orderType: null,
         address: null,
         customerName: null,
@@ -229,18 +159,15 @@ app.post("/twilio/step", (req, res) => {
     }
 
     const session = voiceSessions.get(callSid);
-
-    // User speech
     const speech = String(req.body.SpeechResult || "").trim();
 
     if (!speech) {
-      return twilioRespond(res, "Sorry, I did not catch that. Please say it again.");
+      return twilioRespond(res, "Sorry, I did not catch that.");
     }
 
-    // Pass turn to conversation engine
-    const result = handleUserTurn(store, session, speech);
+    // ✅ FIX: await async engine
+    const result = await handleUserTurn(store, session, speech);
 
-    // If order completed, create ticket and hang up
     if (result.session.completed) {
       const summary = buildConfirmationText(store, result.session);
 
@@ -257,53 +184,35 @@ app.post("/twilio/step", (req, res) => {
       voiceSessions.delete(callSid);
 
       const twiml = new twilio.twiml.VoiceResponse();
-      twiml.say(
-        { voice: "alice", language: "en-CA" },
-        result.reply || "Perfect - your order is confirmed. Thank you!"
-      );
+      twiml.say({ voice: "alice", language: "en-CA" }, result.reply);
       twiml.hangup();
 
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // Continue conversation
     return twilioRespond(res, result.reply);
-
   } catch (err) {
     console.error("Twilio step error:", err);
-
-    const twiml = new twilio.twiml.VoiceResponse();
-    twiml.say(
-      { voice: "alice", language: "en-CA" },
-      "Sorry, something went wrong. Please try again."
-    );
-    twiml.hangup();
-
-    return res.type("text/xml").send(twiml.toString());
+    return twilioRespond(res, "Sorry, something went wrong.");
   }
 });
 
-  
 /* =========================
    WEB CHAT: START
 ========================= */
 
 app.post("/api/chat/start", (req, res) => {
-  // Store phone can be typed in UI; if empty, fallback to env default
-  const storePhone = normalizePhone(req.body.storePhone) || normalizePhone(DEFAULT_STORE_PHONE);
+  const storePhone =
+    normalizePhone(req.body.storePhone) ||
+    normalizePhone(DEFAULT_STORE_PHONE);
 
   const store = safeGetStoreByPhone(storePhone);
   if (!store) {
-    return res.status(404).json({
-      error:
-        "Store not found. Put the correct store phone in the chat box or set DEFAULT_STORE_PHONE in .env."
-    });
+    return res.status(404).json({ error: "Store not found." });
   }
 
-  // Make sessionId
   const sessionId = crypto.randomBytes(16).toString("hex");
 
-  // New chat session state
   const session = {
     store_id: store.id,
     store_phone: storePhone,
@@ -327,26 +236,25 @@ app.post("/api/chat/start", (req, res) => {
 });
 
 /* =========================
-   WEB CHAT: MESSAGE
+   WEB CHAT: MESSAGE (FIXED)
 ========================= */
 
-app.post("/api/chat/message", (req, res) => {
+app.post("/api/chat/message", async (req, res) => {
   const sessionId = String(req.body.sessionId || "");
   const text = String(req.body.text || "").trim();
 
   if (!sessionId || !chatSessions.has(sessionId)) {
-    return res.status(400).json({ error: "Invalid sessionId. Click Start again." });
+    return res.status(400).json({ error: "Invalid sessionId." });
   }
   if (!text) {
     return res.status(400).json({ error: "Empty message." });
   }
 
-  const payload = chatSessions.get(sessionId);
-  const { store, session } = payload;
+  const { store, session } = chatSessions.get(sessionId);
 
-  const result = handleUserTurn(store, session, text);
+  // ✅ FIX: await async engine
+  const result = await handleUserTurn(store, session, text);
 
-  // If completed, create ticket and close chat session
   if (result.session.completed) {
     const summary = buildConfirmationText(store, result.session);
 
@@ -363,7 +271,7 @@ app.post("/api/chat/message", (req, res) => {
     chatSessions.delete(sessionId);
 
     return res.json({
-      message: result.reply || "Perfect — your order is confirmed. Thank you!"
+      message: result.reply || "Perfect — your order is confirmed."
     });
   }
 
@@ -384,9 +292,7 @@ app.get("/api/stores/:id/tickets", (req, res) => {
 
 function twilioRespond(res, text) {
   const twiml = new twilio.twiml.VoiceResponse();
-
   twiml.say({ voice: "alice", language: "en-CA" }, text);
-
   twiml.gather({
     input: "speech",
     language: "en-CA",
@@ -394,7 +300,6 @@ function twilioRespond(res, text) {
     action: "/twilio/step",
     method: "POST"
   });
-
   return res.type("text/xml").send(twiml.toString());
 }
 
@@ -405,6 +310,414 @@ function twilioRespond(res, text) {
 app.listen(PORT, () => {
   console.log("🚀 Store AI running on port", PORT);
 });
+
+// /**
+//  * src/index.js
+//  *
+//  * What this file does:
+//  * 1) Twilio Voice endpoints:
+//  *    - POST /twilio/voice  (call starts)
+//  *    - POST /twilio/step   (each user speech turn)
+//  * 2) Web chat testing endpoints:
+//  *    - POST /api/chat/start
+//  *    - POST /api/chat/message
+//  * 3) Dashboard static hosting:
+//  *    - /dashboard/*
+//  *
+//  * IMPORTANT:
+//  * - Both voice + web chat use the SAME conversation engine.
+//  * - That means behavior is consistent during testing.
+//  */
+
+// import "dotenv/config"; // Loads .env variables
+// import express from "express"; // Web server
+// import cors from "cors"; // Allow cross-origin calls
+// import path from "path"; // Paths
+// import twilio from "twilio"; // Twilio helper to build TwiML
+// import { fileURLToPath } from "url"; // For __dirname in ESM
+// import crypto from "crypto"; // Create random chat session ids
+
+// // Your services
+// import { getStoreByPhone } from "./services/storeService.js";
+// import { createTicket, getTicketsByStore } from "./services/ticketService.js";
+
+// // Our engine (script/slot-filling)
+// import {
+//   getGreetingText,
+//   handleUserTurn,
+//   buildConfirmationText
+// } from "./engine/conversationEngine.js";
+
+// /* =========================
+//    BASIC SETUP
+// ========================= */
+
+// // ESM-safe __dirname
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
+
+// // Create express app
+// const app = express();
+
+// // Allow local testing + dashboard access
+// app.use(cors());
+
+// // Twilio sends URL-encoded body
+// app.use(express.urlencoded({ extended: false }));
+
+// // Dashboard/chat uses JSON
+// app.use(express.json());
+
+// // Static dashboard folder
+// app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
+
+// // Port from Render (or local)
+// const PORT = process.env.PORT || 10000;
+
+// /* =========================
+//    IN-MEMORY SESSIONS
+// ========================= */
+
+// /**
+//  * Voice sessions:
+//  * - key: CallSid
+//  * - value: session object
+//  */
+// const voiceSessions = new Map();
+
+// /**
+//  * Chat sessions:
+//  * - key: sessionId
+//  * - value: { store, session }
+//  */
+// const chatSessions = new Map();
+
+// /**
+//  * Default store phone for chat testing
+//  * - if user leaves storePhone empty in chat UI, we use this.
+//  */
+// const DEFAULT_STORE_PHONE = (process.env.DEFAULT_STORE_PHONE || "").trim();
+
+// /* =========================
+//    PHONE NORMALIZATION
+// ========================= */
+
+// /**
+//  * Normalize phone so your store lookup works more reliably.
+//  * Example:
+//  * - "+1 (604) 123-4567" -> "+16041234567"
+//  * - "16041234567"       -> "+16041234567" (if looks like NA number)
+//  */
+// function normalizePhone(input) {
+//   const raw = String(input || "").trim();
+//   if (!raw) return "";
+
+//   // Keep digits + leading plus
+//   const digits = raw.replace(/[^\d+]/g, "");
+
+//   // If it already starts with + and has digits, keep it
+//   if (digits.startsWith("+")) return digits;
+
+//   // If it looks like 11 digits starting with 1, treat as +1...
+//   if (/^1\d{10}$/.test(digits)) return `+${digits}`;
+
+//   // If it looks like 10 digits, treat as North America +1
+//   if (/^\d{10}$/.test(digits)) return `+1${digits}`;
+
+//   // Otherwise just return digits (better than nothing)
+//   return digits;
+// }
+
+// /* =========================
+//    STORE LOOKUP
+// ========================= */
+
+// function safeGetStoreByPhone(phoneMaybe) {
+//   // Use provided phone if present; else fallback to DEFAULT_STORE_PHONE
+//   const phone = normalizePhone(phoneMaybe) || normalizePhone(DEFAULT_STORE_PHONE);
+
+//   // If still empty, we cannot lookup
+//   if (!phone) return null;
+
+//   // Your storeService should match based on phone
+//   return getStoreByPhone(phone);
+// }
+
+// /* =========================
+//    TWILIO: CALL START
+// ========================= */
+
+// app.post("/twilio/voice", (req, res) => {
+//   // Twilio usually provides To/From/CallSid
+//   const toPhone = req.body.To; // store number
+//   const fromPhone = req.body.From; // caller
+//   const callSid = req.body.CallSid; // unique call id
+
+//   // Find store config
+//   const store = safeGetStoreByPhone(toPhone);
+
+//   // Build TwiML response
+//   const twiml = new twilio.twiml.VoiceResponse();
+
+//   // Create voice session if store is found
+//   if (store && !voiceSessions.has(callSid)) {
+//     voiceSessions.set(callSid, {
+//       store_id: store.id,
+//       store_phone: normalizePhone(toPhone),
+//       caller: normalizePhone(fromPhone),
+
+//       // Order state
+//       orderType: null,     // "Pickup" | "Delivery"
+//       address: null,       // required for delivery
+//       customerName: null,  // optional
+//       items: [],           // pizzas
+//       sides: [],           // sides/drinks
+
+//       // Flow control
+//       awaiting: null,      // e.g. { type: "size", itemIndex: 0 }
+//       confirming: false,   // true when we are asking final confirm
+//       completed: false     // true after confirmed
+//     });
+//   }
+
+//   // If store not found, still respond gracefully
+//   const greeting = store
+//     ? getGreetingText(store)
+//     : "Hi! This store is not configured yet. Please contact the shop owner.";
+
+//   twiml.say({ voice: "alice", language: "en-CA" }, greeting);
+
+//   // Gather speech
+//   twiml.gather({
+//     input: "speech",
+//     language: "en-CA",
+//     bargeIn: true,
+//     action: "/twilio/step",
+//     method: "POST"
+//   });
+
+//   return res.type("text/xml").send(twiml.toString());
+// });
+
+// /* =========================
+//    TWILIO: STEP
+// ========================= */
+
+// app.post("/twilio/step", (req, res) => {
+//   try {
+//     const toPhone = req.body.To;        // may be missing on Gather
+//     const fromPhone = req.body.From;
+//     const callSid = req.body.CallSid;
+
+//     // Reuse store phone saved at call start
+//     const existingSession = voiceSessions.get(callSid);
+
+//     const storePhone =
+//       existingSession?.store_phone ||
+//       normalizePhone(toPhone) ||
+//       normalizePhone(DEFAULT_STORE_PHONE);
+
+//     const store = storePhone ? getStoreByPhone(storePhone) : null;
+
+//     if (!store) {
+//       return twilioRespond(res, "Sorry, this store is not configured yet.");
+//     }
+
+//     // Ensure session exists
+//     if (!voiceSessions.has(callSid)) {
+//       voiceSessions.set(callSid, {
+//         store_id: store.id,
+//         store_phone: storePhone,
+//         caller: normalizePhone(fromPhone),
+
+//         orderType: null,
+//         address: null,
+//         customerName: null,
+//         items: [],
+//         sides: [],
+//         awaiting: null,
+//         confirming: false,
+//         completed: false
+//       });
+//     }
+
+//     const session = voiceSessions.get(callSid);
+
+//     // User speech
+//     const speech = String(req.body.SpeechResult || "").trim();
+
+//     if (!speech) {
+//       return twilioRespond(res, "Sorry, I did not catch that. Please say it again.");
+//     }
+
+//     // Pass turn to conversation engine
+//     const result = handleUserTurn(store, session, speech);
+
+//     // If order completed, create ticket and hang up
+//     if (result.session.completed) {
+//       const summary = buildConfirmationText(store, result.session);
+
+//       createTicket({
+//         store_id: store.id,
+//         caller: session.caller,
+//         items: result.session.items,
+//         sides: result.session.sides,
+//         orderType: result.session.orderType || "Pickup",
+//         address: result.session.address || null,
+//         summary
+//       });
+
+//       voiceSessions.delete(callSid);
+
+//       const twiml = new twilio.twiml.VoiceResponse();
+//       twiml.say(
+//         { voice: "alice", language: "en-CA" },
+//         result.reply || "Perfect - your order is confirmed. Thank you!"
+//       );
+//       twiml.hangup();
+
+//       return res.type("text/xml").send(twiml.toString());
+//     }
+
+//     // Continue conversation
+//     return twilioRespond(res, result.reply);
+
+//   } catch (err) {
+//     console.error("Twilio step error:", err);
+
+//     const twiml = new twilio.twiml.VoiceResponse();
+//     twiml.say(
+//       { voice: "alice", language: "en-CA" },
+//       "Sorry, something went wrong. Please try again."
+//     );
+//     twiml.hangup();
+
+//     return res.type("text/xml").send(twiml.toString());
+//   }
+// });
+
+  
+// /* =========================
+//    WEB CHAT: START
+// ========================= */
+
+// app.post("/api/chat/start", (req, res) => {
+//   // Store phone can be typed in UI; if empty, fallback to env default
+//   const storePhone = normalizePhone(req.body.storePhone) || normalizePhone(DEFAULT_STORE_PHONE);
+
+//   const store = safeGetStoreByPhone(storePhone);
+//   if (!store) {
+//     return res.status(404).json({
+//       error:
+//         "Store not found. Put the correct store phone in the chat box or set DEFAULT_STORE_PHONE in .env."
+//     });
+//   }
+
+//   // Make sessionId
+//   const sessionId = crypto.randomBytes(16).toString("hex");
+
+//   // New chat session state
+//   const session = {
+//     store_id: store.id,
+//     store_phone: storePhone,
+//     caller: String(req.body.from || "web-user"),
+//     orderType: null,
+//     address: null,
+//     customerName: null,
+//     items: [],
+//     sides: [],
+//     awaiting: null,
+//     confirming: false,
+//     completed: false
+//   };
+
+//   chatSessions.set(sessionId, { store, session });
+
+//   return res.json({
+//     sessionId,
+//     message: getGreetingText(store)
+//   });
+// });
+
+// /* =========================
+//    WEB CHAT: MESSAGE
+// ========================= */
+
+// app.post("/api/chat/message", (req, res) => {
+//   const sessionId = String(req.body.sessionId || "");
+//   const text = String(req.body.text || "").trim();
+
+//   if (!sessionId || !chatSessions.has(sessionId)) {
+//     return res.status(400).json({ error: "Invalid sessionId. Click Start again." });
+//   }
+//   if (!text) {
+//     return res.status(400).json({ error: "Empty message." });
+//   }
+
+//   const payload = chatSessions.get(sessionId);
+//   const { store, session } = payload;
+
+//   const result = handleUserTurn(store, session, text);
+
+//   // If completed, create ticket and close chat session
+//   if (result.session.completed) {
+//     const summary = buildConfirmationText(store, result.session);
+
+//     createTicket({
+//       store_id: store.id,
+//       caller: session.caller,
+//       items: result.session.items,
+//       sides: result.session.sides,
+//       orderType: result.session.orderType || "Pickup",
+//       address: result.session.address || null,
+//       summary
+//     });
+
+//     chatSessions.delete(sessionId);
+
+//     return res.json({
+//       message: result.reply || "Perfect — your order is confirmed. Thank you!"
+//     });
+//   }
+
+//   return res.json({ message: result.reply });
+// });
+
+// /* =========================
+//    DASHBOARD API
+// ========================= */
+
+// app.get("/api/stores/:id/tickets", (req, res) => {
+//   return res.json(getTicketsByStore(req.params.id));
+// });
+
+// /* =========================
+//    TWILIO HELPER
+// ========================= */
+
+// function twilioRespond(res, text) {
+//   const twiml = new twilio.twiml.VoiceResponse();
+
+//   twiml.say({ voice: "alice", language: "en-CA" }, text);
+
+//   twiml.gather({
+//     input: "speech",
+//     language: "en-CA",
+//     bargeIn: true,
+//     action: "/twilio/step",
+//     method: "POST"
+//   });
+
+//   return res.type("text/xml").send(twiml.toString());
+// }
+
+// /* =========================
+//    START SERVER
+// ========================= */
+
+// app.listen(PORT, () => {
+//   console.log("🚀 Store AI running on port", PORT);
+// });
 
 // /**
 //  * index.js
