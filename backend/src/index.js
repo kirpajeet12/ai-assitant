@@ -192,13 +192,22 @@ app.post("/twilio/voice", (req, res) => {
 
 app.post("/twilio/step", (req, res) => {
   try {
-    const toPhone = req.body.To;
+    const toPhone = req.body.To;        // ⚠️ may be missing on Gather
     const fromPhone = req.body.From;
     const callSid = req.body.CallSid;
 
-    const store = safeGetStoreByPhone(toPhone);
+    // 🔑 IMPORTANT FIX:
+    // Reuse store phone saved at call start instead of relying on req.body.To
+    const existingSession = voiceSessions.get(callSid);
+
+    const storePhone =
+      existingSession?.store_phone ||
+      normalizePhone(toPhone) ||
+      normalizePhone(DEFAULT_STORE_PHONE);
+
+    const store = storePhone ? getStoreByPhone(storePhone) : null;
+
     if (!store) {
-      // Store config missing
       return twilioRespond(res, "Sorry, this store is not configured yet.");
     }
 
@@ -206,8 +215,9 @@ app.post("/twilio/step", (req, res) => {
     if (!voiceSessions.has(callSid)) {
       voiceSessions.set(callSid, {
         store_id: store.id,
-        store_phone: normalizePhone(toPhone),
+        store_phone: storePhone,           // ✅ use resolved phone
         caller: normalizePhone(fromPhone),
+
         orderType: null,
         address: null,
         customerName: null,
@@ -224,15 +234,14 @@ app.post("/twilio/step", (req, res) => {
     // User speech
     const speech = String(req.body.SpeechResult || "").trim();
 
-    // If no speech, ask again
     if (!speech) {
       return twilioRespond(res, "Sorry, I didn’t catch that. Please say it again.");
     }
 
-    // Pass turn into engine
+    // Pass turn to conversation engine
     const result = handleUserTurn(store, session, speech);
 
-    // If order is completed, create ticket and hang up
+    // If order completed → create ticket + hang up
     if (result.session.completed) {
       const summary = buildConfirmationText(store, result.session);
 
@@ -245,6 +254,33 @@ app.post("/twilio/step", (req, res) => {
         address: result.session.address || null,
         summary
       });
+
+      voiceSessions.delete(callSid);
+
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.say(
+        { voice: "alice", language: "en-CA" },
+        result.reply || "Perfect — your order is confirmed. Thank you!"
+      );
+      twiml.hangup();
+
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    // Continue conversation
+    return twilioRespond(res, result.reply);
+
+  } catch (err) {
+    console.error("❌ Twilio step error:", err);
+
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say(
+      { voice: "alice", language: "en-CA" },
+      "Sorry, something went wrong. Please try again."
+    );
+    twiml.hangup();
+
+    return res.type("text/xml").send(twiml.toString(
 
       // Cleanup memory
       voiceSessions.delete(callSid);
