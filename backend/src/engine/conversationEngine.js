@@ -1,61 +1,56 @@
 /**
- * conversationEngine.js (CATEGORY-DRIVEN, FIXED)
- * - Menu-driven conversation
- * - Supports pizzas, sides, snacks, pastas, drinks
- * - No infinite loops
- * - Users can order ANY item directly
+ * conversationEngine.js (STABLE VERSION)
+ * Fixes:
+ * - Menu questions
+ * - Category ordering (pasta, sides, etc.)
+ * - No ghost sides
+ * - Proper order reset
  */
 
-function norm(t) {
-  return String(t || "").trim();
-}
-function lower(t) {
-  return norm(t).toLowerCase();
-}
+function norm(t) { return String(t || "").trim(); }
+function lower(t) { return norm(t).toLowerCase(); }
+
 function hasAny(t, arr) {
   return arr.some(x => t.includes(x));
 }
 
 /* =========================
-   INTENT HELPERS
+   INTENTS
 ========================= */
 
-function isYes(t) {
-  return /^(yes|y|yeah|yep|ok|confirm)$/i.test(lower(t));
-}
-function isNo(t) {
-  return /^(no|nope|nah|not really)$/i.test(lower(t));
+function isMenuQuestion(t) {
+  return hasAny(lower(t), [
+    "menu",
+    "what do you have",
+    "what are the things you offer",
+    "what else",
+    "anything else",
+    "what do you offer"
+  ]);
 }
 
-function detectQty(text) {
-  const m = lower(text).match(/\b(\d+)\b/);
-  if (m) return parseInt(m[1], 10);
-  if (text.includes("one")) return 1;
-  if (text.includes("two")) return 2;
-  if (text.includes("three")) return 3;
+function isCategoryOnly(t, store) {
+  const cats = Object.keys(store.menu || {});
+  return cats.some(c => lower(t).includes(c));
+}
+
+function detectQty(t) {
+  const m = lower(t).match(/\b(\d+)\b/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function detectSize(t) {
+  const s = lower(t);
+  if (s.includes("large")) return "Large";
+  if (s.includes("medium")) return "Medium";
+  if (s.includes("small")) return "Small";
   return null;
 }
 
-function detectSize(text) {
-  const t = lower(text);
-  if (t.includes("large")) return "Large";
-  if (t.includes("medium")) return "Medium";
-  if (t.includes("small")) return "Small";
-  return null;
-}
-
-function detectSpice(text) {
-  const t = lower(text);
-  if (t.includes("mild")) return "Mild";
-  if (t.includes("medium")) return "Medium";
-  if (t.includes("hot") || t.includes("spicy")) return "Hot";
-  return null;
-}
-
-function detectOrderType(text) {
-  const t = lower(text);
-  if (t.includes("pickup")) return "Pickup";
-  if (t.includes("delivery")) return "Delivery";
+function detectOrderType(t) {
+  const s = lower(t);
+  if (s.includes("pickup")) return "Pickup";
+  if (s.includes("delivery")) return "Delivery";
   return null;
 }
 
@@ -67,27 +62,22 @@ function normalizeMatch(s) {
   return lower(s).replace(/[^a-z0-9\s]/g, "");
 }
 
-function getAllMenuItems(store) {
-  const menu = store?.menu || {};
-  const items = [];
-
-  for (const section of Object.keys(menu)) {
-    const arr = Array.isArray(menu[section]) ? menu[section] : [];
-    for (const item of arr) {
-      items.push({
-        section,
-        ...item
-      });
+function getAllItems(store) {
+  const out = [];
+  for (const cat of Object.keys(store.menu || {})) {
+    const arr = Array.isArray(store.menu[cat]) ? store.menu[cat] : [];
+    for (const i of arr) {
+      out.push({ ...i, category: cat });
     }
   }
-  return items;
+  return out;
 }
 
-function matchItem(store, text) {
+function findItem(store, text) {
   const t = normalizeMatch(text);
-  return getAllMenuItems(store).find(item => {
-    const names = [item.name, ...(item.aliases || [])];
-    return names.some(n => normalizeMatch(n).includes(t) || t.includes(normalizeMatch(n)));
+  return getAllItems(store).find(i => {
+    const names = [i.name, ...(i.aliases || [])];
+    return names.some(n => t.includes(normalizeMatch(n)));
   });
 }
 
@@ -96,17 +86,17 @@ function matchItem(store, text) {
 ========================= */
 
 export function getGreetingText(store) {
-  return store?.conversation?.greeting || "Welcome! What would you like to order?";
+  return store.conversation?.greeting || "What would you like to order?";
 }
 
 export function buildConfirmationText(store, session) {
   const items =
-    session.items?.length
-      ? session.items.map(i => `${i.qty} ${i.name}`).join(", ")
+    session.items.length
+      ? session.items.map(i => `${i.qty} ${i.size ? i.size + " " : ""}${i.name}`).join(", ")
       : "No items";
 
   const sides =
-    session.sides?.length
+    session.sides.length
       ? session.sides.map(s => `${s.qty} ${s.name}`).join(", ")
       : "No sides";
 
@@ -116,59 +106,68 @@ export function buildConfirmationText(store, session) {
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  /* confirmation */
+  /* Initialize */
+  session.items ??= [];
+  session.sides ??= [];
+
+  /* MENU QUESTIONS */
+  if (isMenuQuestion(text)) {
+    const cats = Object.keys(store.menu);
+    return {
+      reply: `We offer: ${cats.join(", ")}. What would you like to order?`,
+      session
+    };
+  }
+
+  /* CONFIRMATION */
   if (session.confirming) {
-    if (isYes(text)) {
+    if (lower(text).startsWith("yes")) {
       session.completed = true;
       return { reply: "Perfect — your order is confirmed. Thank you!", session };
     }
-    if (isNo(text)) {
+    if (lower(text).startsWith("no")) {
       session.confirming = false;
-      return { reply: "No problem. What would you like to change?", session };
+      session.items = [];
+      session.sides = [];
+      return { reply: "No problem. What would you like to order instead?", session };
     }
   }
 
-  /* detect order type */
+  /* ORDER TYPE */
   const ot = detectOrderType(text);
   if (ot) session.orderType = ot;
 
-  /* match menu item */
-  const matched = matchItem(store, text);
-  if (matched) {
+  /* ITEM MATCH */
+  const item = findItem(store, text);
+  if (item) {
     const qty = detectQty(text) || 1;
+    const size = detectSize(text);
 
-    if (matched.section === "pizzas") {
-      session.items = session.items || [];
-      session.items.push({
-        name: matched.name,
-        qty,
-        size: detectSize(text),
-        spice: detectSpice(text)
-      });
+    if (item.category === "pizzas") {
+      session.items.push({ name: item.name, qty, size });
     } else {
-      session.sides = session.sides || [];
-      session.sides.push({ name: matched.name, qty });
+      session.sides.push({ name: item.name, qty });
     }
   }
 
-  /* ask missing size */
-  const pizzaMissingSize = session.items?.find(i => !i.size);
-  if (pizzaMissingSize) {
+  /* ASK SIZE IF PIZZA */
+  const missingSize = session.items.find(i => !i.size);
+  if (missingSize) {
     return { reply: "What size would you like? Small, Medium, or Large?", session };
   }
 
-  /* ask order type */
+  /* ASK ORDER TYPE */
   if (!session.orderType) {
     return { reply: "Pickup or delivery?", session };
   }
 
-  /* ask sides once */
+  /* ASK SIDES ONCE */
   if (!session.sidesAsked) {
     session.sidesAsked = true;
     return { reply: "Would you like any sides or drinks?", session };
   }
 
+  /* CONFIRM */
   session.confirming = true;
   return { reply: buildConfirmationText(store, session), session };
 }
-  
