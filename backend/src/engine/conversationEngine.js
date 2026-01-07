@@ -1,149 +1,180 @@
-import { getOrCreateTicket, saveTicket } from "./services/ticketService.js";
-
 /**
- * MAIN CONVERSATION ENGINE
- * This is the ONLY file controlling order flow
+ * conversationEngine.js
+ * FINAL CLEAN VERSION
+ * - JSON-driven
+ * - No loops
+ * - No menu spam
+ * - Category aware
  */
-export function conversationEngine(phone, userText) {
-  const ticket = getOrCreateTicket(phone);
-  const msg = userText.toLowerCase().trim();
 
-  /* =========================
-     SAFETY: CONFIRMED ORDER
-  ========================= */
-  if (ticket.confirmed) {
-    return `Your order is already confirmed 👍  
-Order number: ${ticket.id}`;
-  }
+/* =========================
+   HELPERS
+========================= */
 
-  /* =========================
-     START
-  ========================= */
-  if (!ticket.step || ticket.step === "START") {
-    ticket.step = "MAIN_ITEM";
-    saveTicket(ticket);
-    return "Welcome to Pizza 64! What would you like to order today?";
-  }
+const norm = t => String(t || "").trim();
+const lower = t => norm(t).toLowerCase();
+const hasAny = (t, arr) => arr.some(x => t.includes(x));
+const safeArr = x => Array.isArray(x) ? x : [];
 
-  /* =========================
-     MAIN ITEM (PIZZA / WINGS)
-  ========================= */
-  if (ticket.step === "MAIN_ITEM") {
-    ticket.items.push(userText);
-    ticket.step = "ORDER_TYPE";
-    saveTicket(ticket);
+/* =========================
+   MENU HELPERS
+========================= */
 
-    return `Got it 👍  
-Would you like **pickup or delivery**?`;
-  }
+function normalize(s) {
+  return lower(s)
+    .replace(/pizza/g, "")
+    .replace(/[^a-z0-9 ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  /* =========================
-     PICKUP / DELIVERY
-  ========================= */
-  if (ticket.step === "ORDER_TYPE") {
-    if (!msg.includes("pickup") && !msg.includes("delivery")) {
-      return "Please tell me if this is **pickup or delivery**.";
-    }
+function getMenu(store) {
+  const m = store.menu || {};
+  return {
+    pizzas: Object.values(m.pizzas || {}).flat(),
+    pastas: safeArr(m.pastas),
+    wings: safeArr(m.wings),
+    sides: safeArr(m.sides),
+    salads: safeArr(m.salads),
+    beverages: safeArr(m.beverages)
+  };
+}
 
-    ticket.orderType = msg.includes("delivery") ? "Delivery" : "Pickup";
-    ticket.step = "SIDES";
-    saveTicket(ticket);
+function detectQty(text) {
+  const m = lower(text).match(/\b(\d+)\b/);
+  return m ? parseInt(m[1], 10) : 1;
+}
 
-    return `Perfect 👍  
-Your ${ticket.orderType.toLowerCase()} order will be ready in about **20 minutes**.
+function detectSize(text) {
+  const t = lower(text);
+  if (t.includes("large")) return "Large";
+  if (t.includes("medium")) return "Medium";
+  if (t.includes("small")) return "Small";
+  return null;
+}
 
-Would you like to add **sides or drinks**?
-We have **wings, garlic bread, fries, and cold drinks**.`;
-  }
+function detectSpice(text) {
+  const t = lower(text);
+  if (t.includes("mild")) return "Mild";
+  if (t.includes("medium")) return "Medium";
+  if (t.includes("hot")) return "Hot";
+  return null;
+}
 
-  /* =========================
-     SIDES
-  ========================= */
-  if (ticket.step === "SIDES") {
-    if (msg.includes("wing")) {
-      ticket.pendingSide = "wings";
-      ticket.step = "WINGS_QTY";
-      saveTicket(ticket);
-
-      return `Nice choice 😄  
-How many wings would you like?
-• 6 pcs  
-• 10 pcs  
-• 20 pcs`;
-    }
-
-    if (!msg.includes("no")) {
-      ticket.items.push(userText);
-    }
-
-    ticket.step = "SUMMARY";
-    saveTicket(ticket);
-    return buildSummary(ticket);
-  }
-
-  /* =========================
-     WINGS QUANTITY
-  ========================= */
-  if (ticket.step === "WINGS_QTY") {
-    const qtyMatch = msg.match(/\d+/);
-    if (!qtyMatch) {
-      return "Please tell me how many wings you’d like (6, 10, or 20).";
-    }
-
-    ticket.items.push(`BBQ Wings (${qtyMatch[0]} pcs)`);
-    ticket.pendingSide = null;
-    ticket.step = "SUMMARY";
-    saveTicket(ticket);
-
-    return buildSummary(ticket);
-  }
-
-  /* =========================
-     SUMMARY & CONFIRMATION
-  ========================= */
-  if (ticket.step === "SUMMARY") {
-    if (msg.includes("yes") || msg.includes("confirm")) {
-      ticket.confirmed = true;
-      ticket.step = "CONFIRMED";
-      saveTicket(ticket);
-
-      return `✅ Order confirmed!
-
-Your order number is **${ticket.id}**  
-Please come to Pizza 64 in about **20 minutes**.
-
-Thank you for ordering 🍕`;
-    }
-
-    if (msg.includes("no")) {
-      ticket.step = "MAIN_ITEM";
-      saveTicket(ticket);
-      return "No problem 👍 What would you like to change?";
-    }
-
-    return "Please reply **Yes** to confirm or **No** to make changes.";
-  }
-
-  /* =========================
-     FALLBACK
-  ========================= */
-  return "Sorry, I didn’t understand that. Please try again.";
+function detectOrderType(text) {
+  const t = lower(text);
+  if (hasAny(t, ["pickup", "pick up"])) return "Pickup";
+  if (hasAny(t, ["delivery", "deliver"])) return "Delivery";
+  return null;
 }
 
 /* =========================
-   ORDER SUMMARY BUILDER
+   ITEM EXTRACTION
 ========================= */
-function buildSummary(ticket) {
-  return `
-Here’s your order summary:
 
-${ticket.items.map(i => `• ${i}`).join("\n")}
+function extractItems(store, text) {
+  const t = normalize(text);
+  const menu = getMenu(store);
+  const items = [];
 
-Order type: ${ticket.orderType}
+  for (const [category, list] of Object.entries(menu)) {
+    for (const item of list) {
+      const names = [
+        normalize(item.name),
+        ...safeArr(item.aliases).map(normalize)
+      ];
 
-Would you like to **confirm this order**?
-(Reply Yes / No)
-`;
+      if (names.some(n => n && t.includes(n))) {
+        items.push({
+          name: item.name,
+          category,
+          qty: detectQty(text),
+          size: category === "pizzas" ? detectSize(text) : null,
+          spice: item.requiresSpice ? detectSpice(text) : null,
+          requiresSpice: item.requiresSpice === true
+        });
+      }
+    }
+  }
+  return items;
+}
+
+/* =========================
+   PUBLIC API
+========================= */
+
+export function getGreetingText(store) {
+  return store?.conversation?.greeting ||
+    "Welcome! What would you like to order?";
+}
+
+export function buildConfirmationText(store, session) {
+  const items = session.items.map(i =>
+    `${i.qty} ${i.size ? i.size + " " : ""}${i.name}${i.spice ? " (" + i.spice + ")" : ""}`
+  ).join(", ");
+
+  return `Please confirm your order. Items: ${items}. Is that correct?`;
+}
+
+/* =========================
+   CORE ENGINE
+========================= */
+
+export function handleUserTurn(store, session, userText) {
+  const text = norm(userText);
+
+  /* CONFIRMATION */
+  if (session.confirming) {
+    if (hasAny(lower(text), ["yes", "confirm", "correct"])) {
+      session.completed = true;
+      return { reply: "Perfect — your order is confirmed. Thank you!", session };
+    }
+
+    if (hasAny(lower(text), ["no", "change"])) {
+      session.confirming = false;
+      session.items = [];
+      return { reply: "No problem. What would you like to change?", session };
+    }
+
+    return { reply: buildConfirmationText(store, session), session };
+  }
+
+  /* EXTRACT ITEMS FIRST (CRITICAL) */
+  const items = extractItems(store, text);
+  if (items.length) {
+    session.items = items;
+  }
+
+  /* ASK SIZE (ONLY PIZZA) */
+  for (const i of session.items || []) {
+    if (i.category === "pizzas" && !i.size) {
+      return { reply: `What size would you like for ${i.name}?`, session };
+    }
+  }
+
+  /* ASK SPICE */
+  for (const i of session.items || []) {
+    if (i.requiresSpice && !i.spice) {
+      return { reply: `What spice level for ${i.name}? Mild, Medium, or Hot?`, session };
+    }
+  }
+
+  /* ORDER TYPE */
+  const ot = detectOrderType(text);
+  if (ot) session.orderType = ot;
+
+  if (session.items?.length && !session.orderType) {
+    return { reply: "Pickup or delivery?", session };
+  }
+
+  /* CONFIRM */
+  if (session.items?.length) {
+    session.confirming = true;
+    return { reply: buildConfirmationText(store, session), session };
+  }
+
+  /* FALLBACK */
+  return { reply: "What would you like to order?", session };
 }
 
 // /**
