@@ -50,12 +50,17 @@ const STORE_PHONE_FILE_MAP = {
 export function getStoreByPhone(phone) {
   const normalized = normalizePhone(phone);
 
+  console.log("🧭 __dirname:", __dirname);
+  console.log("🧭 STORES_DIR:", STORES_DIR);
+  console.log("📞 Incoming phone:", phone, "→ normalized:", normalized);
+
   if (!normalized) {
     console.warn("⚠️ No phone provided");
     return null;
   }
 
   const fileName = STORE_PHONE_FILE_MAP[normalized];
+  console.log("🗂️ Mapped file name:", fileName);
 
   if (!fileName) {
     console.warn("⚠️ Phone not mapped to any store:", normalized);
@@ -63,6 +68,7 @@ export function getStoreByPhone(phone) {
   }
 
   const filePath = path.join(STORES_DIR, fileName);
+  console.log("📄 Full store file path:", filePath);
 
   if (!fs.existsSync(filePath)) {
     console.error("❌ Store file does not exist:", filePath);
