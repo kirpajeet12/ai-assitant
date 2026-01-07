@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Folder where all store JSON files live
-const STORES_DIR = path.resolve(__dirname, "..", "..", "data", "stores");
+const STORES_DIR = path.resolve(__dirname, "..", "data", "stores");
 
 /* =========================================================
    PHONE NORMALIZATION
