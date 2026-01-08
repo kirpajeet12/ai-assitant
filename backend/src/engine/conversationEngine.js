@@ -1,12 +1,6 @@
-
 /**
  * conversationEngine.js
- * FINAL STABLE VERSION
- * - JSON-driven
- * - Category-aware
- * - Upsell once
- * - Pickup/Delivery time from JSON
- * - No loops
+ * FINAL STABLE VERSION (BRACE-SAFE)
  */
 
 /* =========================
@@ -114,7 +108,7 @@ function extractItems(store, text) {
 }
 
 /* =========================
-   MESSAGES
+   PUBLIC TEXT HELPERS
 ========================= */
 
 export function getGreetingText(store) {
@@ -156,13 +150,13 @@ Thank you for ordering 🍕`;
 
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
+
   session.items = session.items || [];
   session.upsellAsked = session.upsellAsked || false;
 
-  /* 1️⃣ CONFIRMATION */
+  /* CONFIRMATION */
   if (session.confirming) {
     if (isConfirmYes(text)) {
-      // Ask upsell ONCE
       if (!session.upsellAsked) {
         session.upsellAsked = true;
         session.confirming = false;
@@ -185,7 +179,7 @@ export function handleUserTurn(store, session, userText) {
     return { reply: buildConfirmationText(store, session), session };
   }
 
-  /* 2️⃣ ADD ITEMS */
+  /* ADD ITEMS */
   const items = extractItems(store, text);
   if (items.length) {
     session.items = items;
@@ -195,21 +189,21 @@ export function handleUserTurn(store, session, userText) {
     return { reply: "What would you like to order?", session };
   }
 
-  /* 3️⃣ SIZE (pizza only) */
+  /* SIZE */
   for (const i of session.items) {
     if (i.category === "pizzas" && !i.size) {
       return { reply: `What size would you like for ${i.name}?`, session };
     }
   }
 
-  /* 4️⃣ SPICE */
+  /* SPICE */
   for (const i of session.items) {
     if (i.requiresSpice && !i.spice) {
       return { reply: `What spice level for ${i.name}? Mild, Medium, or Hot?`, session };
     }
   }
 
-  /* 5️⃣ ORDER TYPE */
+  /* ORDER TYPE */
   const ot = detectOrderType(text);
   if (ot) session.orderType = ot;
 
@@ -217,10 +211,11 @@ export function handleUserTurn(store, session, userText) {
     return { reply: "Pickup or delivery?", session };
   }
 
-  /* 6️⃣ CONFIRM */
+  /* FINAL CONFIRM */
   session.confirming = true;
   return { reply: buildConfirmationText(store, session), session };
 }
+
 
 // /**
 //  * conversationEngine.js
