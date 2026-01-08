@@ -12,7 +12,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ✅ backend/src/data/tickets.json
-const TICKETS_FILE = path.resolve(__dirname, "..", "data", "tickets.json");
+const TICKETS_FILE = path.resolve(__dirname, "..", "tickets.json");
 
 /* =========================
    ENSURE FILE EXISTS
