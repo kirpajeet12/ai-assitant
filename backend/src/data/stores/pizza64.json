@@ -3,6 +3,7 @@
   "id": "pizza64-surrey-132nd",
   "name": "Pizza 64 (Surrey 132nd)",
   "phone": "+12183963550",
+ "dashboardToken": "pizza64-secret-123",
 
   "conversation": {
     "greeting": "Welcome to Pizza 64! What would you like to order today?",
