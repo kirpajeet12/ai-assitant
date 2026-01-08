@@ -17,6 +17,8 @@ import path from "path";
 import twilio from "twilio";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import fs from "fs";
+
 
 // Services
 import { getStoreByPhone } from "./services/storeService.js";
@@ -43,6 +45,18 @@ app.use(express.json());
 app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
 
 const PORT = process.env.PORT || 10000;
+
+//====================
+function getStoreById(storeId) {
+  try {
+    const storePath = path.join(__dirname, "data", "stores", `${storeId}.json`);
+    if (!fs.existsSync(storePath)) return null;
+    return JSON.parse(fs.readFileSync(storePath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
 
 /* =========================
    IN-MEMORY SESSIONS
@@ -282,8 +296,28 @@ app.post("/api/chat/message", async (req, res) => {
    DASHBOARD API
 ========================= */
 
-app.get("/api/stores/:id/tickets", (req, res) => {
-  return res.json(getTicketsByStore(req.params.id));
+/* =========================
+   DASHBOARD API (SECURED)
+========================= */
+
+app.get("/api/tickets/:storeId", (req, res) => {
+  const { storeId } = req.params;
+  const { token } = req.query;
+
+  // Load store config by ID
+  const store = getStoreById(storeId);
+
+  if (!store) {
+    return res.status(404).json({ error: "Store not found" });
+  }
+
+  // Validate dashboard token
+  if (!token || store.dashboardToken !== token) {
+    return res.status(401).json({ error: "Invalid dashboard token" });
+  }
+
+  // Return tickets
+  return res.json(getTicketsByStore(storeId));
 });
 
 /* =========================
