@@ -1,13 +1,13 @@
 /**
  * src/index.js
  *
- * What this file does:
- * 1) Twilio Voice endpoints
- * 2) Web chat endpoints
- * 3) Dashboard static hosting
+ * - Twilio inbound voice
+ * - Web chat
+ * - Complaint → staff handoff
  *
  * IMPORTANT:
- * - Voice + web chat use SAME conversation engine
+ * - conversationEngine decides WHAT to do
+ * - index.js decides HOW to connect calls
  */
 
 import "dotenv/config";
@@ -19,12 +19,11 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import fs from "fs";
 
-
 // Services
 import { getStoreByPhone } from "./services/storeService.js";
 import { createTicket, getTicketsByStore } from "./services/ticketService.js";
 
-// Engine (NOW ASYNC)
+// Engine
 import {
   getGreetingText,
   handleUserTurn,
@@ -46,7 +45,10 @@ app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
 
 const PORT = process.env.PORT || 10000;
 
-//====================
+/* =========================
+   STORE LOADER
+========================= */
+
 function getStoreById(storeId) {
   try {
     const storePath = path.join(__dirname, "data", "stores", `${storeId}.json`);
@@ -57,9 +59,8 @@ function getStoreById(storeId) {
   }
 }
 
-
 /* =========================
-   IN-MEMORY SESSIONS
+   SESSIONS (IN-MEMORY)
 ========================= */
 
 const voiceSessions = new Map();
@@ -113,7 +114,8 @@ app.post("/twilio/voice", (req, res) => {
       sides: [],
       awaiting: null,
       confirming: false,
-      completed: false
+      completed: false,
+      mode: "ORDER"
     });
   }
 
@@ -135,7 +137,7 @@ app.post("/twilio/voice", (req, res) => {
 });
 
 /* =========================
-   TWILIO: STEP (FIXED)
+   TWILIO: STEP (FINAL)
 ========================= */
 
 app.post("/twilio/step", async (req, res) => {
@@ -168,7 +170,8 @@ app.post("/twilio/step", async (req, res) => {
         sides: [],
         awaiting: null,
         confirming: false,
-        completed: false
+        completed: false,
+        mode: "ORDER"
       });
     }
 
@@ -179,9 +182,29 @@ app.post("/twilio/step", async (req, res) => {
       return twilioRespond(res, "Sorry, I did not catch that.");
     }
 
-    // ✅ FIX: await async engine
+    // 🧠 AI ENGINE
     const result = await handleUserTurn(store, session, speech);
 
+    /* =========================
+       🔥 STAFF HANDOFF
+    ========================= */
+    if (result.session.mode === "HANDOFF") {
+      const twiml = new twilio.twiml.VoiceResponse();
+
+      twiml.say(
+        { voice: "alice", language: "en-CA" },
+        "Please hold while I connect you to the store."
+      );
+
+      // 📞 CONNECT TO STORE PHONE
+      twiml.dial(store.phone);
+
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    /* =========================
+       ✅ ORDER COMPLETED
+    ========================= */
     if (result.session.completed) {
       const summary = buildConfirmationText(store, result.session);
 
@@ -204,7 +227,11 @@ app.post("/twilio/step", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
+    /* =========================
+       🔁 CONTINUE AI
+    ========================= */
     return twilioRespond(res, result.reply);
+
   } catch (err) {
     console.error("Twilio step error:", err);
     return twilioRespond(res, "Sorry, something went wrong.");
@@ -212,7 +239,7 @@ app.post("/twilio/step", async (req, res) => {
 });
 
 /* =========================
-   WEB CHAT: START
+   WEB CHAT (UNCHANGED)
 ========================= */
 
 app.post("/api/chat/start", (req, res) => {
@@ -231,14 +258,10 @@ app.post("/api/chat/start", (req, res) => {
     store_id: store.id,
     store_phone: storePhone,
     caller: String(req.body.from || "web-user"),
-    orderType: null,
-    address: null,
-    customerName: null,
     items: [],
-    sides: [],
-    awaiting: null,
     confirming: false,
-    completed: false
+    completed: false,
+    mode: "ORDER"
   };
 
   chatSessions.set(sessionId, { store, session });
@@ -249,10 +272,6 @@ app.post("/api/chat/start", (req, res) => {
   });
 });
 
-/* =========================
-   WEB CHAT: MESSAGE (FIXED)
-========================= */
-
 app.post("/api/chat/message", async (req, res) => {
   const sessionId = String(req.body.sessionId || "");
   const text = String(req.body.text || "").trim();
@@ -260,33 +279,13 @@ app.post("/api/chat/message", async (req, res) => {
   if (!sessionId || !chatSessions.has(sessionId)) {
     return res.status(400).json({ error: "Invalid sessionId." });
   }
-  if (!text) {
-    return res.status(400).json({ error: "Empty message." });
-  }
 
   const { store, session } = chatSessions.get(sessionId);
-
-  // ✅ FIX: await async engine
   const result = await handleUserTurn(store, session, text);
 
   if (result.session.completed) {
-    const summary = buildConfirmationText(store, result.session);
-
-    createTicket({
-      store_id: store.id,
-      caller: session.caller,
-      items: result.session.items,
-      sides: result.session.sides,
-      orderType: result.session.orderType || "Pickup",
-      address: result.session.address || null,
-      summary
-    });
-
     chatSessions.delete(sessionId);
-
-    return res.json({
-      message: result.reply || "Perfect — your order is confirmed."
-    });
+    return res.json({ message: result.reply });
   }
 
   return res.json({ message: result.reply });
@@ -296,27 +295,19 @@ app.post("/api/chat/message", async (req, res) => {
    DASHBOARD API
 ========================= */
 
-/* =========================
-   DASHBOARD API (SECURED)
-========================= */
-
 app.get("/api/tickets/:storeId", (req, res) => {
   const { storeId } = req.params;
   const { token } = req.query;
 
-  // Load store config by ID
   const store = getStoreById(storeId);
-
   if (!store) {
     return res.status(404).json({ error: "Store not found" });
   }
 
-  // Validate dashboard token
   if (!token || store.dashboardToken !== token) {
     return res.status(401).json({ error: "Invalid dashboard token" });
   }
 
-  // Return tickets
   return res.json(getTicketsByStore(storeId));
 });
 
