@@ -1,6 +1,9 @@
 /**
  * conversationEngine.js
- * FINAL STABLE VERSION (BRACE-SAFE)
+ * FINAL STABLE VERSION
+ * - Order flow unchanged
+ * - Complaint → Staff handoff added
+ * - Transcript + context preserved
  */
 
 /* =========================
@@ -50,6 +53,22 @@ function detectSpice(text) {
   if (t.includes("medium")) return "Medium";
   if (t.includes("hot")) return "Hot";
   return null;
+}
+
+/* =========================
+   COMPLAINT HELPERS
+========================= */
+
+function detectComplaint(text) {
+  return hasAny(lower(text), [
+    "complain", "complaint", "wrong", "again",
+    "last time", "rude", "refund", "cancel",
+    "bad", "missing"
+  ]);
+}
+
+function wantsStaff(text) {
+  return hasAny(lower(text), ["manager", "staff", "store", "owner"]);
 }
 
 /* =========================
@@ -108,7 +127,7 @@ function extractItems(store, text) {
 }
 
 /* =========================
-   PUBLIC TEXT HELPERS
+   TEXT BUILDERS
 ========================= */
 
 export function getGreetingText(store) {
@@ -151,17 +170,78 @@ Thank you for ordering 🍕`;
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
+  // --- init session ---
   session.items = session.items || [];
   session.upsellAsked = session.upsellAsked || false;
+  session.mode = session.mode || "ORDER";
+  session.transcript = session.transcript || [];
+  session.complaintHandled = session.complaintHandled || false;
 
-  /* CONFIRMATION */
+  // --- transcript ---
+  session.transcript.push({ from: "user", text, time: Date.now() });
+
+  /* =========================
+     COMPLAINT MODE
+  ========================= */
+
+  if (session.mode === "ORDER" && detectComplaint(text)) {
+    session.mode = "COMPLAINT";
+    return {
+      reply:
+        "I’m really sorry about that. I understand how frustrating this is. " +
+        "Can you tell me exactly what went wrong?",
+      session
+    };
+  }
+
+  if (session.mode === "COMPLAINT" && !session.complaintHandled) {
+    session.complaintHandled = true;
+    session.customerNote = text;
+
+    return {
+      reply:
+        "Thank you for explaining. I’ve noted this. " +
+        "Would you like me to connect you with the store staff?",
+      session
+    };
+  }
+
+  if (session.mode === "COMPLAINT" && wantsStaff(text)) {
+    session.mode = "HANDOFF";
+
+    session.handoffPayload = {
+      phone: session.phone,
+      items: session.items,
+      complaint: session.customerNote,
+      transcript: session.transcript.slice(-10)
+    };
+
+    return {
+      reply:
+        "I’m connecting you with the store staff now. They already have the details.",
+      session
+    };
+  }
+
+  if (session.mode === "HANDOFF") {
+    return {
+      reply: "Please hold while I connect you to the store.",
+      session
+    };
+  }
+
+  /* =========================
+     ORDER CONFIRMATION
+  ========================= */
+
   if (session.confirming) {
     if (isConfirmYes(text)) {
       if (!session.upsellAsked) {
         session.upsellAsked = true;
         session.confirming = false;
         return {
-          reply: "Would you like to add any sides or drinks? (You can say: no / cheese sticks / wings / drinks)",
+          reply:
+            "Would you like to add any sides or drinks? (You can say: no / cheese sticks / wings / drinks)",
           session
         };
       }
@@ -179,11 +259,12 @@ export function handleUserTurn(store, session, userText) {
     return { reply: buildConfirmationText(store, session), session };
   }
 
-  /* ADD ITEMS */
+  /* =========================
+     ADD ITEMS
+  ========================= */
+
   const items = extractItems(store, text);
-  if (items.length) {
-    session.items = items;
-  }
+  if (items.length) session.items = items;
 
   if (!session.items.length) {
     return { reply: "What would you like to order?", session };
