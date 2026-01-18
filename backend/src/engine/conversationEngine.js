@@ -1,11 +1,11 @@
 /**
  * conversationEngine.js
- * FINAL PRODUCTION VERSION
- * - Reads ONLY from store.menu
+ * FINAL STABLE VERSION
+ * - Menu-driven (store.json is source of truth)
  * - Strong category locking (lasagna ≠ pizza)
  * - No stale items
- * - No size for pasta
- * - Complaint → staff handoff supported
+ * - Items NOT cleared on pickup/delivery
+ * - No size asked for pasta
  */
 
 /* =========================
@@ -58,21 +58,6 @@ function detectSpice(text) {
 }
 
 /* =========================
-   COMPLAINT
-========================= */
-
-function detectComplaint(text) {
-  return hasAny(lower(text), [
-    "complain", "complaint", "refund", "wrong",
-    "bad", "missing", "rude", "cancel"
-  ]);
-}
-
-function wantsStaff(text) {
-  return hasAny(lower(text), ["manager", "staff", "store", "owner"]);
-}
-
-/* =========================
    MENU HELPERS
 ========================= */
 
@@ -97,7 +82,7 @@ function getMenu(store) {
 }
 
 /* =========================
-   CATEGORY LOCKING (KEY FIX)
+   CATEGORY LOCKING (CRITICAL)
 ========================= */
 
 function detectStrongCategory(text) {
@@ -112,7 +97,7 @@ function detectStrongCategory(text) {
 }
 
 /* =========================
-   ITEM EXTRACTION (FIXED)
+   ITEM EXTRACTION (SAFE)
 ========================= */
 
 function extractItems(store, text) {
@@ -186,33 +171,12 @@ Your delivery will arrive in about **${convo.deliveryTimeMinutes || 35} minutes*
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  // Init
+  // Init once
   session.items = session.items || [];
   session.confirming = session.confirming || false;
-  session.mode = session.mode || "ORDER";
 
   /* =========================
-     COMPLAINT FLOW
-  ========================= */
-
-  if (session.mode === "ORDER" && detectComplaint(text)) {
-    session.mode = "COMPLAINT";
-    return {
-      reply: "I’m really sorry about that. Can you tell me what went wrong?",
-      session
-    };
-  }
-
-  if (session.mode === "COMPLAINT" && wantsStaff(text)) {
-    session.mode = "HANDOFF";
-    return {
-      reply: "Please hold while I connect you to the store staff.",
-      session
-    };
-  }
-
-  /* =========================
-     CONFIRMATION
+     CONFIRMATION FLOW
   ========================= */
 
   if (session.confirming) {
@@ -224,6 +188,7 @@ export function handleUserTurn(store, session, userText) {
     if (isConfirmNo(text)) {
       session.confirming = false;
       session.items = [];
+      session.orderType = null;
       return { reply: "No problem. What would you like to change?", session };
     }
 
@@ -231,13 +196,15 @@ export function handleUserTurn(store, session, userText) {
   }
 
   /* =========================
-     ITEM EXTRACTION (RESET SAFE)
+     ITEM EXTRACTION (SAFE)
   ========================= */
 
   const items = extractItems(store, text);
 
-  // 🔥 HARD RESET – NO STALE ITEMS EVER
-  session.items = items;
+  // ✅ ONLY update items if food detected
+  if (items.length > 0) {
+    session.items = items;
+  }
 
   if (!session.items.length) {
     return { reply: "What would you like to order?", session };
