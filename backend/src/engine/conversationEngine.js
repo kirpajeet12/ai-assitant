@@ -1,10 +1,10 @@
-/**
+x/**
  * conversationEngine.js
- * FINAL STABLE VERSION
- * - Order flow unchanged
- * - Complaint → Staff handoff added
- * - Transcript + context preserved
+ * AI-assisted intent understanding
+ * Rules remain authoritative
  */
+
+import { interpretIntent } from "../services/aiService.js";
 
 /* =========================
    HELPERS
@@ -16,16 +16,8 @@ const hasAny = (t, arr) => arr.some(x => t.includes(x));
 const safeArr = x => Array.isArray(x) ? x : [];
 
 /* =========================
-   DETECTORS
+   BASIC DETECTORS (RULED)
 ========================= */
-
-function isConfirmYes(text) {
-  return hasAny(lower(text), ["yes", "yep", "yeah", "confirm", "correct", "ok"]);
-}
-
-function isConfirmNo(text) {
-  return hasAny(lower(text), ["no", "nope", "change", "wrong"]);
-}
 
 function detectOrderType(text) {
   const t = lower(text);
@@ -56,22 +48,6 @@ function detectSpice(text) {
 }
 
 /* =========================
-   COMPLAINT HELPERS
-========================= */
-
-function detectComplaint(text) {
-  return hasAny(lower(text), [
-    "complain", "complaint", "wrong", "again",
-    "last time", "rude", "refund", "cancel",
-    "bad", "missing"
-  ]);
-}
-
-function wantsStaff(text) {
-  return hasAny(lower(text), ["manager", "staff", "store", "owner"]);
-}
-
-/* =========================
    MENU HELPERS
 ========================= */
 
@@ -96,7 +72,7 @@ function getMenu(store) {
 }
 
 /* =========================
-   ITEM EXTRACTION
+   ITEM EXTRACTION (RULED)
 ========================= */
 
 function extractItems(store, text) {
@@ -149,108 +125,72 @@ function buildFinalMessage(store, session) {
   if (session.orderType === "Pickup") {
     const mins = convo.pickupTimeMinutes || 20;
     return `Perfect — your order is confirmed ✅  
-Please pick it up in about **${mins} minutes**.  
-Thank you for ordering 🍕`;
+Please pick it up in about ${mins} minutes.`;
   }
 
   if (session.orderType === "Delivery") {
     const mins = convo.deliveryTimeMinutes || 35;
     return `Perfect — your order is confirmed ✅  
-Your delivery will arrive in about **${mins} minutes**.  
-Thank you for ordering 🍕`;
+Your delivery will arrive in about ${mins} minutes.`;
   }
 
-  return "Perfect — your order is confirmed. Thank you!";
+  return "Perfect — your order is confirmed.";
 }
 
 /* =========================
-   CORE ENGINE
+   CORE ENGINE (AI + RULES)
 ========================= */
 
-export function handleUserTurn(store, session, userText) {
+export async function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  // --- init session ---
+  // init
   session.items = session.items || [];
-  session.upsellAsked = session.upsellAsked || false;
+  session.confirming = session.confirming || false;
   session.mode = session.mode || "ORDER";
-  session.transcript = session.transcript || [];
-  session.complaintHandled = session.complaintHandled || false;
-
-  // --- transcript ---
-  session.transcript.push({ from: "user", text, time: Date.now() });
 
   /* =========================
-     COMPLAINT MODE
+     🧠 AI INTENT UNDERSTANDING
   ========================= */
 
-  if (session.mode === "ORDER" && detectComplaint(text)) {
+  const ai = await interpretIntent(userText, session);
+
+  /* =========================
+     AI → RULE BRIDGE
+  ========================= */
+
+  if (ai.intent === "ASK_MENU") {
+    return {
+      reply:
+        "We offer pizzas, pastas, wings, sides, salads, and drinks. What would you like?",
+      session
+    };
+  }
+
+  if (ai.intent === "COMPLAINT") {
     session.mode = "COMPLAINT";
     return {
       reply:
-        "I’m really sorry about that. I understand how frustrating this is. " +
-        "Can you tell me exactly what went wrong?",
+        "I’m really sorry about that. Can you tell me what went wrong?",
       session
     };
   }
 
-  if (session.mode === "COMPLAINT" && !session.complaintHandled) {
-    session.complaintHandled = true;
-    session.customerNote = text;
-
-    return {
-      reply:
-        "Thank you for explaining. I’ve noted this. " +
-        "Would you like me to connect you with the store staff?",
-      session
-    };
-  }
-
-  if (session.mode === "COMPLAINT" && wantsStaff(text)) {
-    session.mode = "HANDOFF";
-
-    session.handoffPayload = {
-      phone: session.phone,
-      items: session.items,
-      complaint: session.customerNote,
-      transcript: session.transcript.slice(-10)
-    };
-
-    return {
-      reply:
-        "I’m connecting you with the store staff now. They already have the details.",
-      session
-    };
-  }
-
-  if (session.mode === "HANDOFF") {
-    return {
-      reply: "Please hold while I connect you to the store.",
-      session
-    };
+  if (ai.intent === "CHANGE_ORDER") {
+    session.items = [];
   }
 
   /* =========================
-     ORDER CONFIRMATION
+     CONFIRMATION
   ========================= */
 
   if (session.confirming) {
-    if (isConfirmYes(text)) {
-      if (!session.upsellAsked) {
-        session.upsellAsked = true;
-        session.confirming = false;
-        return {
-          reply:
-            "Would you like to add any sides or drinks? (You can say: no / cheese sticks / wings / drinks)",
-          session
-        };
-      }
-
+    if (ai.intent === "CONFIRM_YES") {
       session.completed = true;
       return { reply: buildFinalMessage(store, session), session };
     }
 
-    if (isConfirmNo(text)) {
+    if (ai.intent === "CONFIRM_NO") {
       session.confirming = false;
       session.items = [];
       return { reply: "No problem. What would you like to change?", session };
@@ -260,31 +200,45 @@ export function handleUserTurn(store, session, userText) {
   }
 
   /* =========================
-     ADD ITEMS
+     ADD ITEMS (RULED)
   ========================= */
 
   const items = extractItems(store, text);
-  if (items.length) session.items = items;
+  if (items.length) {
+    session.items = items;
+  }
 
   if (!session.items.length) {
     return { reply: "What would you like to order?", session };
   }
 
-  /* SIZE */
+  /* =========================
+     SIZE (PIZZA ONLY)
+  ========================= */
+
   for (const i of session.items) {
     if (i.category === "pizzas" && !i.size) {
       return { reply: `What size would you like for ${i.name}?`, session };
     }
   }
 
-  /* SPICE */
+  /* =========================
+     SPICE
+  ========================= */
+
   for (const i of session.items) {
     if (i.requiresSpice && !i.spice) {
-      return { reply: `What spice level for ${i.name}? Mild, Medium, or Hot?`, session };
+      return {
+        reply: `What spice level for ${i.name}? Mild, Medium, or Hot?`,
+        session
+      };
     }
   }
 
-  /* ORDER TYPE */
+  /* =========================
+     ORDER TYPE
+  ========================= */
+
   const ot = detectOrderType(text);
   if (ot) session.orderType = ot;
 
@@ -292,7 +246,10 @@ export function handleUserTurn(store, session, userText) {
     return { reply: "Pickup or delivery?", session };
   }
 
-  /* FINAL CONFIRM */
+  /* =========================
+     FINAL CONFIRM
+  ========================= */
+
   session.confirming = true;
   return { reply: buildConfirmationText(store, session), session };
 }
