@@ -1,10 +1,11 @@
 /**
  * conversationEngine.js
- * AI-assisted intent understanding
- * Rules remain authoritative
+ * FINAL FIXED VERSION
+ * - Menu-driven (reads from store.json)
+ * - No size asked for pasta / lasagna
+ * - Complaint → staff handoff supported
+ * - No loops, no stale pizza state
  */
-
-import { interpretIntent } from "../services/aiService.js";
 
 /* =========================
    HELPERS
@@ -16,8 +17,28 @@ const hasAny = (t, arr) => arr.some(x => t.includes(x));
 const safeArr = x => Array.isArray(x) ? x : [];
 
 /* =========================
-   BASIC DETECTORS (RULED)
+   CATEGORY RULES (MENU-DRIVEN)
 ========================= */
+
+function categoryAllowsSize(category) {
+  return category === "pizzas";
+}
+
+function categoryAllowsSpice(item) {
+  return item.requiresSpice === true;
+}
+
+/* =========================
+   DETECTORS
+========================= */
+
+function isConfirmYes(text) {
+  return hasAny(lower(text), ["yes", "yep", "yeah", "confirm", "correct", "ok"]);
+}
+
+function isConfirmNo(text) {
+  return hasAny(lower(text), ["no", "nope", "change", "wrong"]);
+}
 
 function detectOrderType(text) {
   const t = lower(text);
@@ -48,6 +69,21 @@ function detectSpice(text) {
 }
 
 /* =========================
+   COMPLAINT HELPERS
+========================= */
+
+function detectComplaint(text) {
+  return hasAny(lower(text), [
+    "complain", "complaint", "refund", "wrong",
+    "bad", "missing", "rude", "cancel"
+  ]);
+}
+
+function wantsStaff(text) {
+  return hasAny(lower(text), ["manager", "staff", "store", "owner"]);
+}
+
+/* =========================
    MENU HELPERS
 ========================= */
 
@@ -72,7 +108,7 @@ function getMenu(store) {
 }
 
 /* =========================
-   ITEM EXTRACTION (RULED)
+   ITEM EXTRACTION (MENU-LOCKED)
 ========================= */
 
 function extractItems(store, text) {
@@ -92,13 +128,14 @@ function extractItems(store, text) {
           name: item.name,
           category,
           qty: detectQty(text),
-          size: category === "pizzas" ? detectSize(text) : null,
-          spice: item.requiresSpice ? detectSpice(text) : null,
+          size: categoryAllowsSize(category) ? detectSize(text) : null,
+          spice: categoryAllowsSpice(item) ? detectSpice(text) : null,
           requiresSpice: item.requiresSpice === true
         });
       }
     }
   }
+
   return items;
 }
 
@@ -123,61 +160,53 @@ function buildFinalMessage(store, session) {
   const convo = store.conversation || {};
 
   if (session.orderType === "Pickup") {
-    const mins = convo.pickupTimeMinutes || 20;
     return `Perfect — your order is confirmed ✅  
-Please pick it up in about ${mins} minutes.`;
+Please pick it up in about **${convo.pickupTimeMinutes || 20} minutes**.  
+Thank you for ordering 🍕`;
   }
 
   if (session.orderType === "Delivery") {
-    const mins = convo.deliveryTimeMinutes || 35;
     return `Perfect — your order is confirmed ✅  
-Your delivery will arrive in about ${mins} minutes.`;
+Your delivery will arrive in about **${convo.deliveryTimeMinutes || 35} minutes**.  
+Thank you for ordering 🍕`;
   }
 
-  return "Perfect — your order is confirmed.";
+  return "Perfect — your order is confirmed. Thank you!";
 }
 
 /* =========================
-   CORE ENGINE (AI + RULES)
+   CORE ENGINE
 ========================= */
 
-export async function handleUserTurn(store, session, userText) {
+export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  // init
+  // Init session
   session.items = session.items || [];
   session.confirming = session.confirming || false;
   session.mode = session.mode || "ORDER";
+  session.transcript = session.transcript || [];
+
+  session.transcript.push({ from: "user", text, time: Date.now() });
 
   /* =========================
-     🧠 AI INTENT UNDERSTANDING
+     COMPLAINT FLOW
   ========================= */
 
-  const ai = await interpretIntent(userText, session);
-
-  /* =========================
-     AI → RULE BRIDGE
-  ========================= */
-
-  if (ai.intent === "ASK_MENU") {
-    return {
-      reply:
-        "We offer pizzas, pastas, wings, sides, salads, and drinks. What would you like?",
-      session
-    };
-  }
-
-  if (ai.intent === "COMPLAINT") {
+  if (session.mode === "ORDER" && detectComplaint(text)) {
     session.mode = "COMPLAINT";
     return {
-      reply:
-        "I’m really sorry about that. Can you tell me what went wrong?",
+      reply: "I’m really sorry about that. Can you tell me what went wrong?",
       session
     };
   }
 
-  if (ai.intent === "CHANGE_ORDER") {
-    session.items = [];
+  if (session.mode === "COMPLAINT" && wantsStaff(text)) {
+    session.mode = "HANDOFF";
+    return {
+      reply: "Please hold while I connect you to the store staff.",
+      session
+    };
   }
 
   /* =========================
@@ -185,12 +214,12 @@ export async function handleUserTurn(store, session, userText) {
   ========================= */
 
   if (session.confirming) {
-    if (ai.intent === "CONFIRM_YES") {
+    if (isConfirmYes(text)) {
       session.completed = true;
       return { reply: buildFinalMessage(store, session), session };
     }
 
-    if (ai.intent === "CONFIRM_NO") {
+    if (isConfirmNo(text)) {
       session.confirming = false;
       session.items = [];
       return { reply: "No problem. What would you like to change?", session };
@@ -200,12 +229,12 @@ export async function handleUserTurn(store, session, userText) {
   }
 
   /* =========================
-     ADD ITEMS (RULED)
+     ADD ITEMS (RESET SAFE)
   ========================= */
 
   const items = extractItems(store, text);
   if (items.length) {
-    session.items = items;
+    session.items = items; // 🔥 HARD RESET — NO STALE PIZZA
   }
 
   if (!session.items.length) {
@@ -213,17 +242,17 @@ export async function handleUserTurn(store, session, userText) {
   }
 
   /* =========================
-     SIZE (PIZZA ONLY)
+     SIZE (ONLY IF MENU ALLOWS)
   ========================= */
 
   for (const i of session.items) {
-    if (i.category === "pizzas" && !i.size) {
+    if (categoryAllowsSize(i.category) && !i.size) {
       return { reply: `What size would you like for ${i.name}?`, session };
     }
   }
 
   /* =========================
-     SPICE
+     SPICE (ONLY IF REQUIRED)
   ========================= */
 
   for (const i of session.items) {
