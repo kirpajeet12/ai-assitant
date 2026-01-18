@@ -1,32 +1,21 @@
 /**
  * conversationEngine.js
- * FINAL FIXED VERSION
- * - Menu-driven (reads from store.json)
- * - No size asked for pasta / lasagna
+ * FINAL PRODUCTION VERSION
+ * - Reads ONLY from store.menu
+ * - Strong category locking (lasagna ≠ pizza)
+ * - No stale items
+ * - No size for pasta
  * - Complaint → staff handoff supported
- * - No loops, no stale pizza state
  */
 
 /* =========================
-   HELPERS
+   BASIC HELPERS
 ========================= */
 
 const norm = t => String(t || "").trim();
 const lower = t => norm(t).toLowerCase();
 const hasAny = (t, arr) => arr.some(x => t.includes(x));
 const safeArr = x => Array.isArray(x) ? x : [];
-
-/* =========================
-   CATEGORY RULES (MENU-DRIVEN)
-========================= */
-
-function categoryAllowsSize(category) {
-  return category === "pizzas";
-}
-
-function categoryAllowsSpice(item) {
-  return item.requiresSpice === true;
-}
 
 /* =========================
    DETECTORS
@@ -69,7 +58,7 @@ function detectSpice(text) {
 }
 
 /* =========================
-   COMPLAINT HELPERS
+   COMPLAINT
 ========================= */
 
 function detectComplaint(text) {
@@ -108,7 +97,22 @@ function getMenu(store) {
 }
 
 /* =========================
-   ITEM EXTRACTION (MENU-LOCKED)
+   CATEGORY LOCKING (KEY FIX)
+========================= */
+
+function detectStrongCategory(text) {
+  const t = lower(text);
+  if (t.includes("lasagna") || t.includes("pasta")) return "pastas";
+  if (t.includes("wing")) return "wings";
+  if (t.includes("salad")) return "salads";
+  if (t.includes("drink") || t.includes("beverage")) return "beverages";
+  if (t.includes("side")) return "sides";
+  if (t.includes("pizza")) return "pizzas";
+  return null;
+}
+
+/* =========================
+   ITEM EXTRACTION (FIXED)
 ========================= */
 
 function extractItems(store, text) {
@@ -116,8 +120,11 @@ function extractItems(store, text) {
   const menu = getMenu(store);
   const items = [];
 
-  for (const [category, list] of Object.entries(menu)) {
-    for (const item of list) {
+  const lockedCategory = detectStrongCategory(text);
+  const categories = lockedCategory ? [lockedCategory] : Object.keys(menu);
+
+  for (const category of categories) {
+    for (const item of menu[category] || []) {
       const names = [
         normalize(item.name),
         ...safeArr(item.aliases).map(normalize)
@@ -128,8 +135,8 @@ function extractItems(store, text) {
           name: item.name,
           category,
           qty: detectQty(text),
-          size: categoryAllowsSize(category) ? detectSize(text) : null,
-          spice: categoryAllowsSpice(item) ? detectSpice(text) : null,
+          size: category === "pizzas" ? detectSize(text) : null,
+          spice: item.requiresSpice ? detectSpice(text) : null,
           requiresSpice: item.requiresSpice === true
         });
       }
@@ -161,17 +168,15 @@ function buildFinalMessage(store, session) {
 
   if (session.orderType === "Pickup") {
     return `Perfect — your order is confirmed ✅  
-Please pick it up in about **${convo.pickupTimeMinutes || 20} minutes**.  
-Thank you for ordering 🍕`;
+Please pick it up in about **${convo.pickupTimeMinutes || 20} minutes**.`;
   }
 
   if (session.orderType === "Delivery") {
     return `Perfect — your order is confirmed ✅  
-Your delivery will arrive in about **${convo.deliveryTimeMinutes || 35} minutes**.  
-Thank you for ordering 🍕`;
+Your delivery will arrive in about **${convo.deliveryTimeMinutes || 35} minutes**.`;
   }
 
-  return "Perfect — your order is confirmed. Thank you!";
+  return "Perfect — your order is confirmed.";
 }
 
 /* =========================
@@ -181,13 +186,10 @@ Thank you for ordering 🍕`;
 export function handleUserTurn(store, session, userText) {
   const text = norm(userText);
 
-  // Init session
+  // Init
   session.items = session.items || [];
   session.confirming = session.confirming || false;
   session.mode = session.mode || "ORDER";
-  session.transcript = session.transcript || [];
-
-  session.transcript.push({ from: "user", text, time: Date.now() });
 
   /* =========================
      COMPLAINT FLOW
@@ -229,30 +231,30 @@ export function handleUserTurn(store, session, userText) {
   }
 
   /* =========================
-     ADD ITEMS (RESET SAFE)
+     ITEM EXTRACTION (RESET SAFE)
   ========================= */
 
   const items = extractItems(store, text);
-  if (items.length) {
-    session.items = items; // 🔥 HARD RESET — NO STALE PIZZA
-  }
+
+  // 🔥 HARD RESET – NO STALE ITEMS EVER
+  session.items = items;
 
   if (!session.items.length) {
     return { reply: "What would you like to order?", session };
   }
 
   /* =========================
-     SIZE (ONLY IF MENU ALLOWS)
+     SIZE (ONLY FOR PIZZA)
   ========================= */
 
   for (const i of session.items) {
-    if (categoryAllowsSize(i.category) && !i.size) {
+    if (i.category === "pizzas" && !i.size) {
       return { reply: `What size would you like for ${i.name}?`, session };
     }
   }
 
   /* =========================
-     SPICE (ONLY IF REQUIRED)
+     SPICE
   ========================= */
 
   for (const i of session.items) {
@@ -282,7 +284,6 @@ export function handleUserTurn(store, session, userText) {
   session.confirming = true;
   return { reply: buildConfirmationText(store, session), session };
 }
-
 
 // /**
 //  * conversationEngine.js
